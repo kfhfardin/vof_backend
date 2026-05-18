@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy app/
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/unit -q
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: votf
+          POSTGRES_PASSWORD: votf
+          POSTGRES_DB: votf_app
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U votf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DEPLOYMENT_PROFILE: local
+      ENVIRONMENT: dev
+      DATABASE_URL: postgresql+asyncpg://votf:votf@localhost:5432/votf_app
+      BRAIN_DATABASE_URL: postgresql+asyncpg://votf:votf@localhost:5432/votf_brain
+      REDIS_URL: redis://localhost:6379/0
+      S3_BUCKET: ci-test
+      S3_ACCESS_KEY: dummy
+      S3_SECRET_KEY: dummy
+      S3_REGION: us-east-1
+      S3_ENDPOINT_URL: http://localhost:9000
+      JWT_SECRET: ci-test-secret-min-32-bytes-please-please
+      PUBLIC_BASE_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Create brain database + pgvector
+        run: |
+          PGPASSWORD=votf psql -h localhost -U votf -d votf_app -c "CREATE DATABASE votf_brain;"
+          PGPASSWORD=votf psql -h localhost -U votf -d votf_brain -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - run: uv run pytest tests/integration -q -m integration

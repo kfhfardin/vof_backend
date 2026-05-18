@@ -1,0 +1,39 @@
+# Repo metadata + caches the build doesn't need.
+.git/
+.github/
+.venv/
+.uv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Local dev artifacts
+.env
+.env.local
+.env.staging
+.env.production
+.env.*.local
+docker-compose.local.yml
+pg_data/
+minio_data/
+.ngrok/
+
+# Tests + design docs aren't shipped in the runtime image.
+tests/
+smoke/
+hld/
+lld/
+skills/*/evals/
+
+# Editor scratch
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Docs / README
+README.md
+*.md

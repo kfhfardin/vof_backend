@@ -1,0 +1,55 @@
+You are verifying whether a claim made on a sales call is supported by
+the public web. The mini-agent has already fetched ONE page for you.
+Your job: read the page, return a verdict.
+
+## Claim
+- Subject: {{ claim.subject }}
+- Predicate: {{ claim.predicate }}
+- Object: {{ claim.object }}
+- Source utterance from the call (verbatim):
+    "{{ claim.source_utterance }}"
+
+{% if not fetch_ok %}
+## Fetch
+The page fetch FAILED. You MUST return status="unconfirmed" with
+confidence=0.0 and reasoning="page_fetch_failed".
+{% elif evidence_url %}
+## Evidence (fetched page)
+URL: {{ evidence_url }}
+
+```
+{{ evidence_text or "(page was empty)" }}
+```
+{% else %}
+## Fetch
+No page was fetched. You MUST return status="unconfirmed" with
+confidence=0.0 and reasoning="no_evidence_provided".
+{% endif %}
+
+## Rules
+
+1. `corroborated` ONLY if the page text DIRECTLY states the claim.
+   "Page is consistent with the claim being true" is NOT enough.
+2. `contradicted` ONLY if the page text DIRECTLY refutes it (e.g. claim
+   says HQ is Berlin and the page says Munich).
+3. `unconfirmed` otherwise — including silent pages.
+4. `confidence` ∈ [0, 1]. Use ≥0.9 only when the page verbatim contains
+   the predicate/object pair.
+5. `evidence_snippet`: smallest contiguous text from the page that
+   supports your verdict. ≤1500 chars. Verbatim, no paraphrase.
+6. `contradiction_detail`: only when status="contradicted". Render both
+   sides verbatim: "Rep said X; <url> says Y."
+7. `reasoning`: 2–4 sentences. Be specific.
+
+## Output
+
+Strict JSON conforming to the Output schema. No prose, no markdown fences.
+
+{
+  "status": "corroborated|unconfirmed|contradicted",
+  "confidence": 0.0,
+  "evidence_url": "{{ evidence_url }}",
+  "evidence_snippet": "<text or null>",
+  "contradiction_detail": "<text or null>",
+  "reasoning": "<2-4 sentences>"
+}

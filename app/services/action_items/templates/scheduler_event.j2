@@ -1,0 +1,21 @@
+{# Variables: item, payload, workspace, tone -#}
+{%- set duration_min = payload.duration_min or 30 -%}
+{%- set attendees = payload.attendees or [] -%}
+Title: {{ payload.title_hint or item.title }}
+
+When: {{ payload.when_hint or (item.due_at.isoformat() if item.due_at else "to be confirmed") }}
+Duration: {{ duration_min }} minutes
+{% if attendees %}Attendees:
+{% for a in attendees %}  - {{ a }}
+{% endfor %}{% endif %}
+Description:
+{{ payload.body_hint or item.description or item.title }}
+
+{% if tone == "friendly" -%}
+Looking forward to it!
+{%- elif tone == "direct" -%}
+Sent by {{ workspace.name }}.
+{%- else -%}
+Best regards,
+{{ workspace.name }}
+{%- endif %}

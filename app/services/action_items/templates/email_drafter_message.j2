@@ -1,0 +1,14 @@
+{# Variables: item, payload, workspace, tone -#}
+Subject: {{ payload.subject_hint or (workspace.name + " — follow up on our call") }}
+
+Hi {{ payload.recipient_name or "there" }},
+
+{{ payload.body_hint or item.description or item.title }}
+{% if tone == "friendly" %}
+Looking forward to hearing back!
+{% elif tone == "direct" %}
+Sent by {{ workspace.name }}.
+{% else %}
+Best regards,
+{{ workspace.name }}
+{% endif %}

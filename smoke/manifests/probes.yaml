@@ -1,0 +1,30 @@
+# Canonical probe registry. Used by `python -m smoke run --all`.
+# Adding a new probe = add a new entry here + create smoke/<name>.py.
+
+probes:
+  third_party:
+    - module: smoke.agentphone
+      critical: true
+    - module: smoke.supermemory
+      critical: true
+    - module: smoke.llm
+      critical: true
+    - module: smoke.google_workspace
+      critical: false
+  infrastructure:
+    - module: smoke.postgres_app
+      critical: true
+    - module: smoke.postgres_brain
+      critical: true
+    - module: smoke.redis
+      critical: true
+    - module: smoke.object_storage
+      critical: true
+
+modes:
+  default: check
+  pre_release: smoke
+
+exit_policy:
+  on_config_error: fail_fast            # don't run others if env is broken
+  on_upstream_down: collect_and_report  # don't block deploy on third-party outage

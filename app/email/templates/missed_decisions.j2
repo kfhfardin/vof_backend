@@ -1,0 +1,16 @@
+Subject: Decisions awaiting your response — {{ workspace.name }}
+
+Hi,
+
+The following decisions timed out without a response and need your attention.
+
+{% if artifact.get('decisions') %}
+{% for d in artifact['decisions'] %}
+- {{ d.get('prompt', '') }}{% if d.get('options') %} (options: {{ d['options'] | join(', ') }}){% endif %}
+{% endfor %}
+{% else %}
+No decisions timed out in the current window.
+{% endif %}
+
+{% if tone == 'friendly' %}Thanks for catching up!{% else %}Best,{% endif %}
+{{ workspace.name }}

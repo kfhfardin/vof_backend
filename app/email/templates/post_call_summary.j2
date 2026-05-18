@@ -1,0 +1,25 @@
+Subject: Call with {{ artifact.get('summary', {}).get('caller_name') or artifact.get('caller_name') or 'a Rep' }} — {{ (artifact.get('ended_at') or '')[:10] }}
+
+Hi,
+
+Here's a summary of a call your team just completed.
+
+## Discussion
+{{ artifact.get('summary', {}).get('discussion', '') }}
+
+{% if artifact.get('summary', {}).get('blockers') %}
+## Blockers raised
+{% for b in artifact['summary']['blockers'] %}
+- {{ b }}
+{% endfor %}
+{% endif %}
+
+{% if artifact.get('summary', {}).get('action_items') %}
+## Action items
+{% for ai in artifact['summary']['action_items'] %}
+- {{ ai }}
+{% endfor %}
+{% endif %}
+
+{% if tone == 'friendly' %}Have a great day!{% else %}Best,{% endif %}
+{{ workspace.name }}

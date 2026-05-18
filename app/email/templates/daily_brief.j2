@@ -1,0 +1,43 @@
+Subject: Daily brief for {{ workspace.name }} — {{ (artifact.get('date') or '')[:10] }}
+
+Hi,
+
+Here's your daily brief.
+
+{% if artifact.get('at_a_glance') %}
+## Yesterday at a glance
+{% for line in artifact['at_a_glance'] %}
+- {{ line }}
+{% endfor %}
+{% endif %}
+
+{% if artifact.get('missed_decisions') %}
+## Decisions you missed
+{% for d in artifact['missed_decisions'] %}
+- {{ d.get('prompt', '') }}{% if d.get('context') %} — {{ d['context'] }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if artifact.get('account_movement') %}
+## Account movement
+{% for a in artifact['account_movement'] %}
+- {{ a }}
+{% endfor %}
+{% endif %}
+
+{% if artifact.get('reps_in_motion') %}
+## Reps in motion
+{% for r in artifact['reps_in_motion'] %}
+- {{ r }}
+{% endfor %}
+{% endif %}
+
+{% if artifact.get('escalations') %}
+## Stub-to-real escalations
+{% for e in artifact['escalations'] %}
+- {{ e }}
+{% endfor %}
+{% endif %}
+
+{% if tone == 'friendly' %}Have a great day!{% else %}Best,{% endif %}
+{{ workspace.name }}

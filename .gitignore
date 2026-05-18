@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual envs / dep managers
+.venv/
+venv/
+.uv/
+uv.lock
+
+# Env / secrets
+.env
+.env.local
+.env.staging
+.env.production
+.env.*.local
+*.bak
+
+# Test + coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Smoke probe artifacts
+verify_hot_path_report_*.json
+
+# Docker volumes / data
+pg_data/
+minio_data/
+
+# Local dev tunnels
+.ngrok/

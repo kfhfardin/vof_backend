@@ -1,0 +1,47 @@
+{# Orchestrator turn prompt - renders into the `user` message of the chat
+   completion. The system message is rendered separately from system_prompt.j2.
+
+   Inputs (see schema.py::Input + app/orchestrator/prompts.py):
+     workspace_name, caller, rep_utterance, conversation_history,
+     caller_hits, brain_hits, manager_whispers, decision_updates
+#}
+## Caller
+- Name: {{ caller.name or "(unprofiled)" }}
+{% if caller.role %}- Role: {{ caller.role }}{% endif %}
+{% if caller.team %}- Team: {{ caller.team }}{% endif %}
+{% if caller.profile_summary %}- Profile: {{ caller.profile_summary }}{% endif %}
+
+{% if caller_hits %}## Caller memory (most relevant)
+{% for hit in caller_hits %}- {{ hit.snippet }}{% if hit.title %} ({{ hit.title }}){% endif %}
+{% endfor %}
+{% endif %}
+{% if brain_hits %}## Workspace brain (most relevant)
+{% for hit in brain_hits %}- [{{ hit.slug_or_id }}] {{ hit.title }} — {{ hit.snippet }}
+{% endfor %}
+{% endif %}
+{% if manager_whispers %}## Manager guidance (private - do not repeat verbatim to caller)
+{% for w in manager_whispers %}- {{ w }}
+{% endfor %}
+Use this guidance to shape your next reply. Respond naturally as if it were your
+own judgment; do not acknowledge that the Manager spoke.
+{% endif %}
+{% if decision_updates %}## Pending decisions resolved since last turn
+{% for d in decision_updates %}{% if d.status == "answered" %}- Manager answered "{{ d.prompt }}" with: {{ d.response }} (via {{ d.via }})
+{% else %}- Manager did not respond to "{{ d.prompt }}" (timed out). Tell the Rep plainly
+  that you couldn't reach the Manager and you'll follow up later. Then move on
+  to the next topic - do NOT keep waiting.
+{% endif %}{% endfor %}
+{% endif %}
+
+## Conversation so far
+{% for turn in conversation_history %}{{ turn.speaker }}: {{ turn.text }}
+{% endfor %}
+
+## New utterance from {{ caller.name or "the Rep" }}
+{{ rep_utterance }}
+
+Reply now. One or two sentences unless the Rep just said something that
+genuinely needs a longer answer. Do not preface ("Sure", "Of course"); just speak.
+{% if decision_updates %}If any decisions above were answered, weave the answer in
+naturally. If any timed out, tell the Rep we couldn't reach leadership and move on.
+{% endif %}

@@ -1,0 +1,44 @@
+You are summarizing a phone call between a Field Rep and the {{ caller.name or "agent" }}.
+Extract the meaningful detail. Be specific. Quote the Rep's own framing where it matters.
+
+## Caller
+{% if caller.name %}- Name: {{ caller.name }}{% endif %}
+{% if caller.role %}- Role: {{ caller.role }}{% endif %}
+
+{% if provider_summary %}## Provider-side summary (hint - the call provider's own pass; use as one signal among many, do not just repeat)
+{{ provider_summary }}
+{% endif %}
+
+{% if brain_context %}## Workspace brain context (pages the call touched)
+{% for b in brain_context %}- [{{ b.slug }}] {{ b.title }} — {{ b.snippet }}
+{% endfor %}
+{% endif %}
+
+## Transcript (turn-by-turn)
+{% for t in transcript %}{{ t.speaker }}: {{ t.text }}
+{% endfor %}
+
+## OUTPUT
+Reply with ONLY this JSON, conforming to the Output schema:
+
+{
+  "discussion": "<2-3 sentence narrative of what was discussed>",
+  "blockers": ["<short blocker phrase>", "..."],
+  "extracted_entities": [
+    {"type": "person" | "company" | "product" | "theme", "name": "<exact name>", "slug_hint": "<optional, e.g. accounts/acme-corp>"}
+  ],
+  "verbatim_quotes": ["<direct caller quote, ≤200 chars>", "..."],
+  "topics": ["<normalized topic, e.g. 'pricing-objection' or 'integration-timeline'>", "..."]
+}
+
+RULES
+- Do not hallucinate entities not present in the transcript.
+- Blockers are explicit obstacles the Rep mentioned (e.g. "buyer wants
+  signed NDA before next call", not "discussed pricing").
+- Slug hints follow the pattern `<kind-plural>/<slugified-name>`: accounts/,
+  people/, products/, themes/ - or omit if unsure.
+- verbatim_quotes: 0–10 direct quotes from the caller that capture key
+  moments. Copy verbatim, do not paraphrase. Skip if nothing stands out.
+- topics: 0–15 short kebab-case tags ('pricing-objection',
+  'integration-timeline', 'churn-risk'). Used for cross-call rollups.
+- Output ONLY the JSON object. No prose, no markdown fences.
