@@ -65,7 +65,10 @@
       "Bash(git add *)",
       "Bash(git check-ignore *)",
       "Bash(gh repo *)",
-      "Bash(xargs -0 grep -lE \"sk_live_|whsec_|sm_qka|gho_|ghp_|ghs_|AKIA|aws_secret|BEDROCK_BEARER|password\\\\s*=\\\\s*[\\\\\"'][^\\\\\"']{8,}|api[_-]?key\\\\s*=\\\\s*[\\\\\"'][A-Za-z0-9_]{20,}\")"
+      "Bash(xargs -0 grep -lE \"sk_live_|whsec_|sm_qka|gho_|ghp_|ghs_|AKIA|aws_secret|BEDROCK_BEARER|password\\\\s*=\\\\s*[\\\\\"'][^\\\\\"']{8,}|api[_-]?key\\\\s*=\\\\s*[\\\\\"'][A-Za-z0-9_]{20,}\")",
+      "Bash(grep -nE \"sk_live_|whsec_|sm_qka|gho_|ghp_|ghs_|AKIA|BEDROCK_BEARER|api[_-]?key\\\\s*=\\\\s*[\\\\\"'][A-Za-z0-9_]{20,}\" .claude/settings.local.json)",
+      "Bash(git config *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
