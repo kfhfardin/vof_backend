@@ -16,12 +16,9 @@ Supermemory for per-rep caller memory.
 > **SMS caveat:** outbound SMS via AgentPhone is gated on US-carrier
 > 10DLC registration at the account level. **Inbound SMS works
 > immediately; outbound SMS replies fail with HTTP 404 from AP until
-> 10DLC registration is complete** in the AP dashboard. The full
-> architecture ships and works; you just won't see a reply until that
-> paperwork clears.
+> 10DLC registration is complete** in the AP dashboard.
 
-Design docs: [`hld/`](./hld/) for the high-level design,
-[`lld/`](./lld/) for low-level design per phase
+Design docs: [`hld/`](./hld/), [`lld/`](./lld/)
 (`phase_0_scaffolding_and_mvp.md`, `phase_1_durability_and_productivity.md`).
 
 ---
@@ -34,13 +31,18 @@ Design docs: [`hld/`](./hld/) for the high-level design,
 4. [LLM provider — Anthropic direct OR AWS Bedrock](#llm-provider--anthropic-direct-or-aws-bedrock)
 5. [Connection-pooling + lifespan](#connection-pooling--lifespan)
 6. [Optional third-party integrations](#optional-third-party-integrations)
-7. [Running the production container locally](#running-the-production-container-locally)
-8. [Smoke tests — per-integration verification](#smoke-tests--per-integration-verification)
-9. [Unit + integration tests](#unit--integration-tests)
-10. [Seeding a Workspace into the DB](#seeding-a-workspace-into-the-db)
-11. [Live end-to-end testing (real phone call)](#live-end-to-end-testing-real-phone-call)
-12. [Common make targets](#common-make-targets)
-13. [Troubleshooting](#troubleshooting)
+7. [HTTP + WebSocket API reference](#http--websocket-api-reference)
+8. [LLM-facing surface — Skills + Orchestrator tools](#llm-facing-surface--skills--orchestrator-tools)
+9. [Background workers + mini-agents](#background-workers--mini-agents)
+10. [Services layer](#services-layer)
+11. [Database models + migrations](#database-models--migrations)
+12. [Running the production container locally](#running-the-production-container-locally)
+13. [Smoke tests — per-integration verification](#smoke-tests--per-integration-verification)
+14. [Unit + integration tests](#unit--integration-tests)
+15. [Seeding a Workspace into the DB](#seeding-a-workspace-into-the-db)
+16. [Live end-to-end testing (real phone call)](#live-end-to-end-testing-real-phone-call)
+17. [Common make targets](#common-make-targets)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -54,136 +56,39 @@ pieces can be unit-tested, smoke-tested, and replaced without rewriting
 the rest.
 
 ```
-.
-├── app/                          # FastAPI application package
-│   ├── main.py                   # ASGI entrypoint: `uvicorn app.main:app`
-│   ├── factory.py                # build_app() — routers, middleware, lifespan
-│   ├── lifespan.py               # startup warmup + shutdown drain (see § Connection-pooling)
-│   ├── deps.py                   # FastAPI deps + provider singletons (LLM/Telephony/Memory/Store)
-│   ├── settings.py               # pydantic-settings; reads .env / env vars
-│   ├── errors.py                 # exception hierarchy + handlers
-│   │
-│   ├── api/                      # HTTP + WebSocket surface
-│   │   ├── auth.py               # signup, login, refresh, logout (rotation + revocation)
-│   │   ├── me.py                 # /me
-│   │   ├── webhooks/
-│   │   │   ├── agentphone.py     # AP webhook: HMAC → dedupe → parse → dispatch
-│   │   │   └── agentmail.py      # AgentMail inbound replies (Phase 1)
-│   │   └── workspaces/
-│   │       ├── intake.py         # form/upload/voice-intake + classification (Phase 0)
-│   │       ├── decisions.py      # list / get / respond (first-responder-wins)
-│   │       ├── calls.py          # list calls + transcripts + artifacts (Phase 1 F1)
-│   │       ├── brain.py          # workspace brain pages + corrections
-│   │       ├── ws.py             # multi-call WebSocket (live frames)
-│   │       ├── action_items.py   # list / approve / execute (Phase 1 F3)
-│   │       ├── dashboards.py     # briefs + trends (Phase 1 F8)
-│   │       ├── email.py          # list inbox (Phase 1 F6)
-│   │       ├── verifications.py  # claim verification results (Phase 1 F5)
-│   │       └── integrations.py   # OAuth surface (Phase 1 F9; Google dormant)
-│   │
-│   ├── orchestrator/             # per-turn LLM loop (§C4 / HLD §15)
-│   │   ├── turn_loop.py          # voice turn driver: retrieval → LLM → reply
-│   │   ├── sms_orchestrator.py   # turn-based SMS path (no streaming)
-│   │   ├── prompts.py            # message builder
-│   │   ├── retrieval.py          # Caller-memory + Brain hybrid search (parallel)
-│   │   ├── streaming.py          # NDJSON wrapper + bridge phrases
-│   │   ├── session.py            # Redis-backed CallSession (CAS via WATCH)
-│   │   ├── prewarm.py            # one-time cache warmup helpers
-│   │   ├── tool_dispatch.py      # mid-stream <<TOOL …>> marker scanner
-│   │   └── tools/
-│   │       ├── request_manager_decision.py
-│   │       ├── request_correction.py
-│   │       └── end_call.py
-│   │
-│   ├── miniagents/               # background workflows
-│   │   ├── summarizer_agent.py     # post-call summary
-│   │   ├── brain_updater.py        # upsert pages / append timeline
-│   │   ├── caller_memory_writer.py # Supermemory writes (per-rep tag)
-│   │   ├── email_drafter.py        # F3: drafts + Gmail send (Google optional)
-│   │   ├── email_delivery.py       # F6: AgentMail outbound
-│   │   ├── email_reply_handler.py  # F6: inbound webhook → handler dispatch
-│   │   ├── scheduler.py            # F3: calendar event creation (Google optional)
-│   │   ├── web_verifier.py         # F5: claim verification mini-agent
-│   │   └── dashboard_rollup.py     # F8: daily brief rollup
-│   │
-│   ├── workers/                  # arq jobs: post_call (fan-out), decision_timeout,
-│   │                             #   correction_cascade
-│   │
-│   ├── services/                 # app-layer services
-│   │   ├── auth_service.py       # signup, login, refresh (with rotation), logout
-│   │   ├── workspace_provisioning.py
-│   │   ├── intake_processor.py + intake_processing.py
-│   │   ├── intake_extractors/    # PDF, DOCX, XLSX, CSV, JSON, Markdown/text
-│   │   ├── intake_handlers/      # scope-specific Brain ingesters
-│   │   ├── action_items/         # F3: heuristic extractor + save + templates
-│   │   ├── dashboards/           # F8: aggregator
-│   │   ├── web_verifier/         # F5: browser client (browser-use optional)
-│   │   ├── corrections.py        # replace_compiled_truth / soft_delete / append_timeline
-│   │   └── correction_intake.py
-│   │
-│   ├── skills/                   # Python-side LLMSkill registry + loader
-│   │   ├── base.py               # LLMSkill ABC + ClassVar.model
-│   │   ├── loader.py             # walks ../skills/<name>/, parses SKILL.md
-│   │   └── llm_client.py         # OpenAICompatClient + BedrockMessagesClient (cached)
-│   │
-│   ├── brain/                    # BrainProvider protocol + PostgresBrainProvider
-│   │   ├── postgres_brain.py     # per-Workspace pgvector schemas
-│   │   ├── entity_extractor.py   # F4: brain self-update entity extraction
-│   │   └── tags.py
-│   │
-│   ├── memory/                   # CallerMemoryProvider protocol +
-│   │                             #   Supermemory adapter (cached) + Stub
-│   ├── telephony/                # TelephonyProvider protocol + AgentPhoneAdapter
-│   │                             #   (cached) + Fake + WebhookDispatcher
-│   ├── email/                    # AgentMail + composer + OAuth-personal + templates
-│   ├── connectors/               # OAuth connectors (google_workspace.py — dormant)
-│   ├── storage/                  # S3-compat ObjectStore (aiobotocore, cached)
-│   ├── realtime/                 # Redis pub/sub bus + WS frame schemas
-│   ├── db/                       # SQLAlchemy models + repositories + sessions
-│   ├── migrations/               # Alembic env + per-target versions/
-│   ├── security/                 # JWT, password hashing, HMAC
-│   ├── observability/            # OTel + structlog wiring
-│   └── schemas/                  # Pydantic request/response + WS frames
-│
-├── skills/                       # LLM skill assets (loaded at boot)
-│   ├── classifier/               # intake classifier
-│   ├── orchestrator/             # live voice + SMS turn loop
-│   ├── summarizer/               # post-call summary
-│   ├── web_verifier/             # F5: verification reasoning prompt
-│   └── dashboard_rollup_writer/  # F8: daily brief narrative composer
-│
-├── smoke/                        # per-integration verification probes
-│   ├── _base.py                  # Probe ABC, ExitCode, CheckResult
-│   ├── _runner.py                # aggregator (multi-probe runner)
-│   ├── postgres_app.py           # app DB
-│   ├── postgres_brain.py         # brain DB (pgvector + schema lifecycle)
-│   ├── redis.py                  # connect, pub/sub, dedupe-set TTL
-│   ├── object_storage.py         # PUT/GET/signed URL/prefix isolation
-│   ├── llm.py                    # OpenAI-compat + Bedrock — branches on LLM_PROVIDER
-│   ├── supermemory.py            # write/search/profile + caller isolation
-│   ├── agentphone.py             # auth/webhook/HMAC/SMS/conv-state
-│   └── manifests/probes.yaml     # registry the aggregator reads
-│
-├── tests/
-│   ├── unit/                     # fast, no external services (173 tests)
-│   ├── integration/              # require docker compose Postgres/Redis (5 files)
-│   ├── e2e/                      # full stack + fake AP (scaffolded)
-│   └── load/                     # latency budget checks (scaffolded)
-│
-├── scripts/
-│   ├── alembic_wrapper.py        # multi-DB dispatcher (app | brain)
-│   ├── seed_test_workspace.py    # seed Org + Manager + Workspace (+ optional FE)
-│   └── postgres_init/01_dbs.sh   # creates brain DB + pgvector at first boot
-│
-├── hld/                          # high-level design
-├── lld/                          # low-level design per phase
-│
-├── Dockerfile                    # multi-stage prod image (uv → slim runtime)
-├── docker-compose.yml            # full stack: built image + infra + worker
-├── docker-compose.local.yml      # infra only — for the dev inner-loop
-├── alembic.ini                   # app DB target
-├── alembic-brain.ini             # brain DB target
-└── pyproject.toml                # uv-managed deps + ruff + mypy + pytest
+app/
+├── main.py / factory.py / lifespan.py / deps.py / settings.py / errors.py
+├── api/             — HTTP + WebSocket surface (auth, me, webhooks, workspaces/*)
+├── orchestrator/    — voice + SMS turn loops + retrieval + tools
+├── miniagents/      — post-call workflows (summarize, brain, memory, email, scheduler, verifier, dashboard)
+├── workers/         — arq job runners (post_call, decision_timeout, etc.)
+├── services/        — app-layer services (auth, intake, decisions, corrections, dashboards, action_items, web_verifier)
+├── skills/          — Skill loader + cached LLMClient (OpenAI-compat + Bedrock)
+├── brain/           — PostgresBrainProvider (per-Workspace pgvector schemas)
+├── memory/          — Supermemory adapter (cached, single-tag retrieval)
+├── telephony/       — AgentPhoneAdapter (cached) + dispatcher
+├── email/           — AgentMail provider + composer + templates
+├── connectors/      — OAuth connectors (google_workspace.py — dormant)
+├── storage/         — S3-compat ObjectStore (aiobotocore, cached)
+├── realtime/        — Redis pub/sub bus + WS frame schemas
+├── db/              — SQLAlchemy models + repos + sessions
+├── migrations/      — Alembic env + per-target versions/
+├── security/        — JWT + bcrypt + HMAC
+├── observability/   — OTel + structlog
+├── schemas/         — Pydantic request/response + WS frames
+└── connectors/      — third-party SDK clients
+
+skills/
+├── classifier/                — intake scope/kind classification (Haiku)
+├── orchestrator/              — live voice + SMS turn loop (Haiku/Sonnet)
+├── summarizer/                — post-call summary + entity extraction (Sonnet)
+├── web_verifier/              — claim corroboration (Sonnet, F5)
+└── dashboard_rollup_writer/   — daily brief composer (Sonnet, F8)
+
+smoke/      — per-integration probes (postgres × 2, redis, S3, llm, supermemory, agentphone)
+tests/      — unit (173 tests), integration (5 files), e2e (scaffolded), load (scaffolded)
+scripts/    — alembic_wrapper, seed_test_workspace, postgres_init
+hld/ lld/   — design docs
 ```
 
 ### Hot path — one voice turn
@@ -191,62 +96,34 @@ the rest.
 ```
 AgentPhone webhook (HMAC) → app.api.webhooks.agentphone
   → WebhookDispatcher → app.orchestrator.turn_loop.TurnLoop.run
-    ├── append caller fragment to transcripts (Postgres)
-    ├── retrieve in parallel (~150ms budget):
-    │     • Caller-memory single-tag search  (Supermemory, cached httpx)
-    │     • Brain hybrid search              (pgvector + tsvector)
-    ├── render prompt (app.orchestrator.prompts)
+    ├── persist caller fragment (Postgres)
+    ├── speculative retrieval race (~150ms budget):
+    │     • prewarmed snapshot from Redis (~1ms read)
+    │     • fresh: Caller-memory single-tag search ∥ Brain hybrid search
+    │     • whichever wins first feeds the prompt
+    ├── render prompt (system + turn templates)
     ├── stream LLM (Anthropic direct OR Bedrock invoke_model_with_response_stream)
     │     └── mid-stream <<TOOL …>> markers dispatched via ToolRegistry
-    ├── wrap tokens as NDJSON chunks → StreamingResponse → AgentPhone
-    ├── append agent reply + publish multi-call WS frames
+    ├── NDJSON chunks → StreamingResponse → AgentPhone TTS
+    ├── persist agent reply + publish WS frames
     └── save CallSession to Redis (CAS via WATCH/MULTI/EXEC)
-```
-
-### SMS hot path (Phase 1)
-
-```
-AgentPhone webhook (HMAC, sms/imessage) → app.api.webhooks.agentphone
-  → app.orchestrator.sms_orchestrator.handle_inbound_sms
-    ├── same retrieval (caller memory + brain)
-    ├── same prompt rendering
-    ├── LLM non-streaming completion
-    └── AgentPhoneAdapter.send_sms(agent_id, to_number, body)
-       (10DLC gate: outbound returns 404 until your AP account is registered)
 ```
 
 ### Post-call fan-out (Phase 1 F2)
 
 ```
 agent.call_ended webhook → post_call_job (arq)
-  ├── summarizer skill → {discussion, blockers, extracted_entities}
-  ├── save call artifact (full transcript) → object store
+  ├── summarizer skill → {discussion, blockers, extracted_entities, topics, quotes}
+  ├── save call artifact (canonical_summary.json) → object store
   ├── PARALLEL:
-  │     • brain_updater       (F4: upsert pages / append timeline)
+  │     • brain_updater       (F4: upsert pages / append timeline / web-verifier trust tags)
   │     • caller_memory_writer (Supermemory add, [caller, workspace] tags)
-  │     • action_items heuristic extractor (F3: extract candidate items)
-  │     • web_verifier        (F5: queue claim verifications)
-  │     • email_drafter       (F3: render outbound email drafts)
-  │     • dashboard_rollup    (F8: roll into daily snapshot)
+  │     • web_verifier_fanout (F5: queue claim verifications)
+  │     • action_items extract (F3: heuristic candidates → pending_approval)
+  │     • dashboard_rollup    (F8 — actually fires nightly, not per-call)
   └── publish call.summary_ready WS frame
+  └── enqueue email_delivery_job for opted-in recipients
 ```
-
-### Provider contracts
-
-Every external dependency is behind a Protocol so tests + dev paths can
-swap a fake in via FastAPI `dependency_overrides`:
-
-| Protocol                        | Real impl                          | Test fake / stub                    |
-|---------------------------------|------------------------------------|-------------------------------------|
-| `TelephonyProvider`             | `AgentPhoneAdapter`                | `FakeTelephonyProvider`             |
-| `CallerMemoryProvider`          | `SupermemoryCallerMemoryProvider`  | `StubCallerMemoryProvider`          |
-| `BrainProvider`                 | `PostgresBrainProvider`            | (uses real brain DB in tests)       |
-| `ObjectStore`                   | `S3ObjectStore` (aiobotocore)      | (uses MinIO in tests)               |
-| `LLMClient`                     | `OpenAICompatClient` OR `BedrockMessagesClient` | `FakeLLMClient` |
-| `EmailProvider` (Phase 1)       | `AgentMailProvider`                | no-op when key empty                |
-
-Each real implementation **caches its underlying transport for the
-process lifetime** — see [§ Connection-pooling + lifespan](#connection-pooling--lifespan).
 
 ---
 
@@ -257,7 +134,7 @@ process lifetime** — see [§ Connection-pooling + lifespan](#connection-poolin
 - Auth: signup, login, **refresh-token rotation + reuse detection**, logout
 - Telephony: AgentPhone webhook + HMAC verify + dispatch
 - Orchestrator hot path: voice turn streaming through Claude
-- Per-rep Caller Memory (Supermemory containerTags)
+- Per-rep Caller Memory (Supermemory containerTags, single-tag retrieval)
 - Per-Workspace Brain (pgvector + tsvector hybrid search)
 - Decision flow: SMS pings + first-responder-wins + timeouts
 - Tools: `request_manager_decision`, `request_correction`, `end_call`
@@ -269,22 +146,22 @@ process lifetime** — see [§ Connection-pooling + lifespan](#connection-poolin
 
 | ID | Feature | Status |
 |---|---|---|
-| F1 | Transcripts + Call History | ✅ shipped |
+| F1 | Transcripts + Call History (calls list, transcript, summary, recording, interventions, WS replay) | ✅ shipped |
 | F2 | Post-call pipeline fan-out worker | ✅ shipped |
-| F3 | Action Items (extract → approve → execute) | ✅ shipped |
-| F4 | Brain Self-Update (entity extractor) | ✅ shipped |
-| F5 | Web Verifier (claim verification) | ✅ shipped (`BROWSER_USE_API_KEY` optional — falls back to httpx + regex stripper) |
-| F6 | Email Surface (in + out + drafter) | ✅ shipped (`AGENTMAIL_API_KEY` optional — no-ops when empty) |
+| F3 | Action Items (heuristic extract → approve → handler execute) | ✅ shipped |
+| F4 | Brain Self-Update (entity extractor + web-verifier trust tags) | ✅ shipped |
+| F5 | Web Verifier (claim verification) | ✅ shipped — `BROWSER_USE_API_KEY` optional (falls back to httpx + regex stripper) |
+| F6 | Email Surface (AgentMail outbound + inbound + drafter) | ✅ shipped — `AGENTMAIL_API_KEY` optional (no-ops when empty) |
 | F7 | Manager Intervention (whisper) | ✅ shipped |
-| F8 | Dashboards (daily brief + trends) | ✅ shipped |
+| F8 | Dashboards (daily brief + trends + saved queries) | ✅ shipped |
 | F9 | Google Workspace OAuth + handlers | 🟡 **dormant** — connector code is in place but env vars are intentionally not surfaced. Endpoints return 503; email/scheduler handlers return drafts with `error: "google_oauth_not_configured"`. To re-enable, add `GOOGLE_OAUTH_CLIENT_ID` + `_SECRET` back to settings + env. |
 
-Phase 1 added 8 new tables (`correction_intakes`, `action_items`,
-`manager_interventions`, `claim_verifications`, `email_messages`,
-`workspace_oauth_credentials`, `dashboard_snapshots`,
-`saved_dashboard_queries`) plus columns on `manager_workspaces`
-(`email_inbox_id`, `email_inbox_addr`, `email_domain`). All in
-`app/migrations/versions_app/0010_phase_1_unified.py`.
+Migration `0010_phase_1_unified.py` adds 8 new tables
+(`correction_intakes`, `action_items`, `manager_interventions`,
+`claim_verifications`, `email_messages`, `workspace_oauth_credentials`,
+`dashboard_snapshots`, `saved_dashboard_queries`) plus columns on
+`manager_workspaces` (`email_inbox_id`, `email_inbox_addr`,
+`email_domain`).
 
 ---
 
@@ -309,18 +186,13 @@ set -a && source .env.local && set +a
 make smoke          # connectivity check across all infra + third-party
 make test           # unit tests (173 pass)
 
-# 6. Run migrations (creates both app + brain schemas, applies Phase 0 + Phase 1)
+# 6. Run migrations (Phase 0 + Phase 1 both)
 make migrate
 
 # 7. Start the API and (in another shell) the arq worker
 make run            # uvicorn app.main:app --reload  → http://localhost:8000
 make worker         # arq app.workers.settings.WorkerSettings
 ```
-
-The dev inner-loop uses **`docker-compose.local.yml`** which only ships
-the infra services (Postgres, Redis, MinIO). FastAPI + arq run on the
-host so `--reload` and breakpoints work. For production-image-in-the-loop
-testing, see [Running the production container locally](#running-the-production-container-locally).
 
 ---
 
@@ -337,61 +209,39 @@ production implementations selected by **`LLM_PROVIDER`**:
 
 Tests swap in `FakeLLMClient` via `set_llm_client()`. When the
 production key is missing for the selected provider, the factory falls
-back to `FakeLLMClient` with a stderr warning — dev environments
-without a real key won't silently produce garbage skill output.
+back to `FakeLLMClient` with a stderr warning.
 
-### Anthropic direct (default)
-
+**Anthropic direct:**
 ```bash
-# .env.local
 LLM_PROVIDER=openai_compat
 LLM_API_KEY=sk-ant-...
 LLM_BASE_URL=https://api.anthropic.com/v1/openai
-LLM_DEFAULT_MODEL=claude-sonnet-4-6                   # orchestrator hot path
-LLM_MODEL=claude-haiku-4-5                            # smoke probe
+LLM_DEFAULT_MODEL=claude-sonnet-4-6
+LLM_MODEL=claude-haiku-4-5
 ```
 
-### AWS Bedrock
-
-Bedrock requires the **native Anthropic Messages API** path
-(`invoke_model` + `invoke_model_with_response_stream`). AWS does
-publish an OpenAI-compat endpoint at `/openai/v1/chat/completions` but
-it 404s on many accounts — the native path is the universally-available
-surface. `BedrockMessagesClient` handles this via `aiobotocore` with a
-single cached client reused across calls (cold-start is ~12s, warm
-calls are ~1s — lifespan warms the client at startup so the first real
-voice turn doesn't pay the cold cost).
-
+**AWS Bedrock:**
 ```bash
-# .env.local
 LLM_PROVIDER=bedrock
-ANTHROPIC_API_KEY=<Bedrock long-term API key>         # NOT an sk-ant key
+ANTHROPIC_API_KEY=<Bedrock long-term API key>
 AWS_REGION=us-east-1
 LLM_DEFAULT_MODEL=us.anthropic.claude-sonnet-4-6      # cross-region inference profile
-LLM_MODEL=us.anthropic.claude-sonnet-4-6              # smoke probe uses the same
+LLM_MODEL=us.anthropic.claude-sonnet-4-6
 ```
 
-**Model IDs must be cross-region inference profile IDs** (prefixed with
-the region group, e.g. `us.`). Plain Anthropic IDs like
-`anthropic.claude-sonnet-4-6` raise `ValidationException` because
-on-demand throughput isn't supported.
+Model IDs must be **cross-region inference profile IDs** (`us.` prefix);
+plain Anthropic IDs raise `ValidationException` on Bedrock.
 
-### Skill model IDs
-
-Each skill pins its model in `skills/<name>/SKILL.md` frontmatter. When
-flipping providers, also flip the frontmatter — e.g.
-`model: us.anthropic.claude-sonnet-4-6` for Bedrock or
-`model: claude-sonnet-4-6` for Anthropic direct.
+Each skill pins its model in `skills/<name>/SKILL.md` frontmatter —
+flip both `.env` and the frontmatter together when switching providers.
 
 ---
 
 ## Connection-pooling + lifespan
 
-Every long-lived adapter (LLM, telephony, memory, object store, Redis)
-caches its underlying transport for the process lifetime — TLS
-handshakes and pool setup happen once at startup, not on every request.
-
-### Cached clients (verified by unit tests)
+Every long-lived adapter caches its underlying transport for the
+process lifetime — TLS handshakes and pool setup happen once at
+startup, not on every request.
 
 | Adapter                              | Cached object         | Built on first call to | Closed by `_close_singletons()` |
 |--------------------------------------|-----------------------|------------------------|---------------------------------|
@@ -403,18 +253,12 @@ handshakes and pool setup happen once at startup, not on every request.
 | Redis singleton (`get_redis()`)      | `redis.asyncio` pool  | first access           | yes                             |
 | App + brain DB engines               | `AsyncEngine` (`@lru_cache`'d) | first session  | (closed on process exit)        |
 
-Each adapter uses double-checked locking around an `asyncio.Lock` so two
-concurrent requests during cold start don't race to build two clients.
-The cache-contract tests in
-[`tests/unit/test_llm_streaming.py`](tests/unit/test_llm_streaming.py)
-assert that two consecutive `_get_client()` calls return the **same**
-object (`is` identity); regression to per-call construction fails them
-loudly.
+Double-checked locking on an `asyncio.Lock` per adapter; concurrent
+cold-start requests don't race. Cache-contract tests in
+`tests/unit/test_llm_streaming.py` assert each `_get_client()` returns
+the same instance.
 
 ### Startup warmup (`app/lifespan.py`)
-
-On FastAPI startup, after the registries are loaded, lifespan warms the
-expensive cold paths so the first real voice turn doesn't pay them:
 
 ```
 lifespan_startup_begin
@@ -426,14 +270,9 @@ lifespan_startup_begin
 lifespan_startup_complete
 ```
 
-Each warmup step is best-effort with `try/except` + `log.warning` — a
-failure during warmup is logged but doesn't block startup (the first
-real call just pays the cold cost instead).
+Each step is best-effort with `try/except` + `log.warning`.
 
-### Shutdown drain (`_close_singletons()`)
-
-On uvicorn shutdown, lifespan walks every cached singleton and calls
-`.close()` so connection pools drain gracefully:
+### Shutdown drain
 
 ```
 lifespan_shutdown_begin
@@ -445,355 +284,662 @@ lifespan_shutdown_begin
 lifespan_shutdown_complete
 ```
 
-Each close is independently `try/except`'d — a failure to drain one
-pool never blocks the others.
-
 ---
 
 ## Optional third-party integrations
 
-Three third-party integrations are **optional** in Phase 1 — code paths
-detect missing config and degrade cleanly:
-
 ### AgentMail (F6)
-
-`AGENTMAIL_API_KEY` empty:
-- Outbound email no-ops; `email_delivery` mini-agent logs + skips
-- Inbound webhook (`POST /api/v1/webhooks/agentmail/webhook`) still 200s but doesn't process
-
-With `AGENTMAIL_API_KEY` set:
-- `app/email/agentmail.py` hits `https://api.agentmail.to/v0`
-- Optional `EMAIL_DOMAIN` gives each workspace `<slug>@<your-domain>` (default is `*.agentmail.to`)
-- Phase 1 speed variant **skips webhook signature verification** (worth tightening for prod)
+`AGENTMAIL_API_KEY` empty → outbound email no-ops, inbound webhook
+returns 200 without processing. Set it to enable F6. `EMAIL_DOMAIN`
+optional for custom `<slug>@<your-domain>` (defaults to `*.agentmail.to`).
+Webhook signature verification is intentionally skipped (Phase 1 speed
+variant — tighten for prod).
 
 ### Browser Use (F5)
-
-`BROWSER_USE_API_KEY` empty:
-- `app/services/web_verifier/browser_client.py` uses an httpx + regex HTML-stripper fallback
-- Good enough for the "did the page say this?" verifier prompt on static HTML pages
-- JS-rendered pages won't verify until the real SDK is wired
-
-With `BROWSER_USE_API_KEY` set:
-- The real Browser Use Cloud SDK can drop in — `BrowserSession.fetch_page` interface is shaped for it
+`BROWSER_USE_API_KEY` empty → web verifier uses httpx + regex HTML
+stripper (good enough for the verifier prompt on static pages).
+JS-rendered pages need the real SDK.
 
 ### Google Workspace (F9 — dormant)
+Connector code stays in place. With env vars not surfaced:
+- `/api/v1/workspaces/{ws}/integrations/google/*` return **HTTP 503**
+  with `{"error":"google_oauth_not_configured"}`
+- `email_drafter` returns drafts with that error (no Gmail send)
+- `scheduler` returns event drafts with that error (no Calendar event)
+- `OAuthPersonalEmailProvider` raises `NotImplementedError` →
+  `email_delivery` maps to `oauth_connector_unavailable` and may fall
+  back to AgentMail
 
-By default the connector is **disabled** at config layer (env vars are
-not surfaced; `is_google_workspace_configured()` returns `False`).
-Effects:
+To re-enable: add `google_oauth_client_id` + `_secret` to
+`app/settings.py` and `GOOGLE_OAUTH_CLIENT_ID` + `_SECRET` to
+`.env.local`.
 
-- `/api/v1/workspaces/{ws}/integrations/google/auth_url` and `/callback` return **HTTP 503** with `{"error":"google_oauth_not_configured"}`
-- `email_drafter` mini-agent returns the draft with `error: "google_oauth_not_configured"` (no Gmail send)
-- `scheduler` mini-agent returns a rendered event draft with the same error (no Calendar event)
-- `OAuthPersonalEmailProvider.send_message` raises `NotImplementedError` → `email_delivery` maps to `oauth_connector_unavailable` and falls back to AgentMail
+---
 
-To re-enable later:
+## HTTP + WebSocket API reference
 
-1. Add to `app/settings.py`:
-   ```python
-   google_oauth_client_id: SecretStr = SecretStr("")
-   google_oauth_client_secret: SecretStr = SecretStr("")
-   ```
-2. Add to `.env.local`:
-   ```bash
-   GOOGLE_OAUTH_CLIENT_ID=
-   GOOGLE_OAUTH_CLIENT_SECRET=
-   ```
-3. Set real values. `is_google_workspace_configured()` flips to `True`,
-   endpoints stop returning 503, mini-agents resume calling Gmail / Calendar.
-   No code changes needed — connector + handlers + endpoints + repo +
-   migration all stayed in place.
+All routes prefixed with `/api/v1`. Auth column meaning:
+- **Public** — no auth required (signup, login, refresh, webhooks)
+- **CurrentUser** — valid `Authorization: Bearer <access_token>`
+- **require_workspace_access** — CurrentUser + workspace_id in path must match user's workspace
+
+### `auth.py` — `/auth/*`
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| POST | `/auth/signup` | `{email, password, workspace_name}` | `SignupResponse(user, workspace, tokens)` | Public | Create org + workspace + manager user; provisions AP number + brain schema + memory namespace + AgentMail inbox |
+| POST | `/auth/login` | `{email, password}` | `TokenPair` | Public | Authenticate; issue access + refresh tokens |
+| POST | `/auth/refresh` | `{refresh_token}` | `TokenPair` | Public | Rotate refresh token (reuse detection — old token replay revokes the whole chain) |
+| POST | `/auth/logout` | `{refresh_token}` | 204 | Public | Revoke refresh token (idempotent) |
+
+### `me.py` — `/me`
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/me` | — | `MeResponse(user, workspace)` | CurrentUser | Current user + workspace context |
+
+### `webhooks/agentphone.py` — `/webhooks/agentphone`
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| POST | `/webhooks/agentphone` | raw (HMAC) | 200 OK OR `StreamingResponse` NDJSON (voice turns) | HMAC + replay window + dedupe | AP webhook dispatch: voice turns stream; SMS, call_ended, reactions sync-process |
+
+Sequence: HMAC verify → replay-window check → Redis dedupe by
+`X-Webhook-ID` → `adapter.parse_webhook` → `materialize_scope_and_call`
+→ dispatcher (voice / sms / call_ended / reaction).
+
+### `webhooks/agentmail.py` — `/integrations/agentmail/webhook`
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| POST | `/integrations/agentmail/webhook` | raw (no signature verification per LLD speed variant) | 200 | Public | Inbound email replies — route to `email_reply_handler` (CorrectionIntake for manager, IntakeBufferItem for rep) |
+
+### `workspaces/intake.py` — `/workspaces/{ws}/intake/*`
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| POST | `/intake/text` | `{text, purpose}` | `IntakeUploadResponse` | require_workspace_access | Submit text for classification + handler ingest |
+| POST | `/intake/upload` | multipart `{file, purpose}` | `IntakeUploadResponse` | require_workspace_access | Upload PDF/DOCX/XLSX/CSV/JSON/text; SHA256 dedupe |
+| GET | `/intake/items` | `?purpose=&limit=&offset=` | `IntakeListResponse` | require_workspace_access | List intake items, filtered by purpose |
+| GET | `/intake/items/{id}` | — | `IntakeItemSummary` | require_workspace_access | Single item with classification + handler_result |
+| GET | `/intake/items/{id}/download` | — | 302 redirect (signed URL) | require_workspace_access | Download original blob |
+| POST | `/intake/items/{id}/supersede` | `{new_item_id}` | 204 | require_workspace_access | Mark older version superseded |
+| DELETE | `/intake/items/{id}` | `?force=` | 204 | require_workspace_access | Soft delete |
+| POST | `/intake/items/{id}/process` | — | `IntakeItemSummary` | require_workspace_access | Trigger / retry processing |
+| GET | `/intake/review` | — | `IntakeReviewResponse` | require_workspace_access | Manager triage view (needs_review items) |
+
+### `workspaces/decisions.py` — `/workspaces/{ws}/decisions/*`
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/decisions` | `?status=&limit=&offset=` | `DecisionListResponse` | require_workspace_access | List decisions for this workspace |
+| GET | `/decisions/{id}` | — | `DecisionSummary` | require_workspace_access | Single decision detail |
+| POST | `/decisions/{id}/respond` | `{response, via}` | `DecisionSummary` | require_workspace_access | First-responder-wins; SELECT FOR UPDATE |
+| POST | `/decisions/{id}/resolve_now` | `{option}` | `{decision_id, status, response, responded_at, auto_approved_action_items}` | require_workspace_access | Force-resolve a timed-out decision; auto-approve gated action items |
+
+### `workspaces/calls.py` — `/workspaces/{ws}/calls/*` (Phase 1 F1)
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/calls` | `?status=&limit=&offset=` | `CallListResponse` | require_workspace_access | List calls |
+| GET | `/calls/{id}` | — | `CallSummary` | require_workspace_access | Call metadata + status |
+| GET | `/calls/{id}/transcript` | — | `CallTranscriptResponse` (fragments) | require_workspace_access | Full transcript |
+| GET | `/calls/{id}/summary` | — | canonical summary JSON | require_workspace_access | AI-generated summary from post-call worker |
+| POST | `/calls/{id}/whisper` | `{guidance}` | `WhisperResponse(intervention_id)` | require_workspace_access | F7 manager intervention — guidance is appended to next turn's prompt as `manager_whispers` |
+| GET | `/calls/{id}/recording` | — | 302 redirect (signed S3 URL) | require_workspace_access | Download call recording if ready |
+| WS | `/calls/{id}/replay` | (upgrade) | streaming `transcript_fragment` + `replay_done` frames | Public (workspace_id in path) | Real-time playback of historical transcript |
+| GET | `/calls/{id}/interventions` | — | `InterventionListResponse` | require_workspace_access | List all whispers for this call |
+
+### `workspaces/brain.py` — `/workspaces/{ws}/brain/*`
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/brain/pages/{slug}` | — | `BrainPageView` | require_workspace_access | Current page snapshot (compiled_truth + timeline + tags + manager_authoritative flag) |
+| GET | `/brain/pages/{slug}/versions` | — | `BrainPageVersionsResponse` | require_workspace_access | Full version history |
+| POST | `/brain/corrections` | `{target_slug, kind, payload, rationale}` | `BrainPageView | null` | require_workspace_access | Apply correction (`replace_compiled_truth` / `soft_delete_page` / `append_timeline_entry`); marks page `manager_authoritative` |
+
+### `workspaces/action_items.py` — `/workspaces/{ws}/action_items/*` (Phase 1 F3)
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/action_items` | `?status=&limit=&offset=` | `ActionItemListResponse` | require_workspace_access | List action items (filter by status: pending_approval, approved, done, failed, etc.) |
+| POST | `/action_items/{id}/approve` | — | `ActionItemDTO` | require_workspace_access | Approve → eligible for handler execution (scheduler / email_drafter) |
+| POST | `/action_items/{id}/reject` | — | `ActionItemDTO` | require_workspace_access | Reject — handler never runs |
+| PATCH | `/action_items/{id}` | `{title?, description?, due_at?, payload?, handler?}` | `ActionItemDTO` | require_workspace_access | Edit fields before approval (e.g. set recipient_email on email handler) |
+
+### `workspaces/dashboards.py` — `/workspaces/{ws}/dashboards/*` (Phase 1 F8)
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/dashboards/daily_brief` | `?date=YYYY-MM-DD` | `DailyBriefResponse` (subject_line + 5 sections) | require_workspace_access | Daily brief for date (default: yesterday) |
+| GET | `/dashboards/overview` | — | `OverviewResponse` (live KPIs from app DB) | require_workspace_access | Today's live stats |
+| GET | `/dashboards/reps` | `?range=30d` | `SnapshotListResponse` | require_workspace_access | Rep dimension trend |
+| GET | `/dashboards/accounts` | `?range=` | `SnapshotListResponse` | require_workspace_access | Account movement trend |
+| GET | `/dashboards/themes` | `?range=` | `SnapshotListResponse` | require_workspace_access | Top themes trend |
+| GET | `/dashboards/decisions` | `?range=` | `SnapshotListResponse` | require_workspace_access | Missed-decisions trend |
+| GET | `/dashboards/queries` | — | `SavedQueryListResponse` | require_workspace_access | List saved queries (max 10 per user) |
+| POST | `/dashboards/queries` | `{name, dimension, filters, pinned}` | `SavedQueryResponse` | require_workspace_access | Save a query |
+| GET | `/dashboards/queries/{id}` | — | `SavedQueryResponse` | require_workspace_access | Single saved query |
+| DELETE | `/dashboards/queries/{id}` | — | 204 | require_workspace_access | Delete saved query |
+
+### `workspaces/email.py` — `/workspaces/{ws}/email/*` (Phase 1 F6)
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/email/messages` | `?limit=&offset=` | `EmailMessageListResponse` | require_workspace_access | Email audit trail (outbound + inbound replies) |
+
+### `workspaces/verifications.py` — `/workspaces/{ws}/calls/{id}/verifications` etc. (Phase 1 F5)
+
+| Method | Path | Body | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/calls/{id}/verifications` | — | `ClaimVerificationListResponse` | require_workspace_access | Fact-checks for claims in this call |
+| GET | `/brain/pages/{slug}/verifications` | — | `ClaimVerificationListResponse` | require_workspace_access | Fact-checks referencing this brain page |
+
+### `workspaces/integrations.py` — `/workspaces/{ws}/integrations/*` (Phase 1 F9, dormant)
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| GET | `/integrations/google/auth_url` | — | `{auth_url}` OR **503** | require_workspace_access | Build Google OAuth URL — returns 503 when Google is dormant |
+| GET | `/integrations/google/callback` | `?code=&state=` | `{status, integration}` OR **503** | require_workspace_access | OAuth callback — same 503 behavior |
+| GET | `/integrations` | — | `{integrations: [...]}` | require_workspace_access | List connected integrations (returns `[]` when none) |
+| DELETE | `/integrations/{id}` | — | 204 | require_workspace_access | Disconnect / revoke |
+
+### `workspaces/ws.py` — `/workspaces/{ws}/ws/*`
+
+| Method | Path | Body / Query | Response | Auth | Purpose |
+|---|---|---|---|---|---|
+| POST | `/ws/token` | — | `WSTokenResponse(token, ttl_seconds=30)` | require_workspace_access | Mint one-time WS token (30s TTL, GET-then-DEL via Redis) |
+| WS | `/ws/live` | `?token=` | live frame stream | Token (query) | Multi-call WebSocket bus — see frames table below |
+
+### WS frame catalog (`app/schemas/ws_frames.py`)
+
+Emitted on `/ws/live`. FE multiplexes by `type` field.
+
+| Frame `type` | Emitted by | Payload |
+|---|---|---|
+| `snapshot` | Server on WS connect | `calls: [CallStartedFrame]` — in-progress calls at join time |
+| `call.started` | call materialization (first voice/SMS event) | `call_id, field_employee_id, started_at` |
+| `transcript.fragment` | each speaker turn (caller + agent) | `call_id, speaker (caller|agent), text, seq, ts` |
+| `decision.opened` | `request_manager_decision` tool fires | `call_id, decision_id, prompt, options, decision_class, timeout_at` |
+| `decision.resolved` | decision answered OR timed-out | `call_id, decision_id, response, responded_via (websocket|sms|timeout)` |
+| `call.ended` | AP `agent.call_ended` webhook | `call_id, ended_at` |
+| `call.summary_ready` | post_call_job completes | `call_id, has_summary, brain_pages_touched: [str]` — FE re-fetches summary |
+| `ping` | server heartbeat | `ts` |
+
+---
+
+## LLM-facing surface — Skills + Orchestrator tools
+
+### Skills
+
+Each Skill is a directory under `skills/<name>/` with SKILL.md frontmatter
+(name, version, model, prompt, trigger, quality_bar), a Jinja prompt
+template, a Pydantic Input/Output schema in `schema.py`, fixtures, and an
+eval harness. The loader walks the directory at boot and registers each
+into `SkillRegistry`. **Skills are static** — they don't self-improve at
+runtime; context evolution drives behavior.
+
+| Skill | Trigger | Default model | Input (key fields) | Output (key fields) |
+|---|---|---|---|---|
+| `classifier` | `intake_buffer_item_added` | Haiku | `workspace_name, content, source, roster, known_accounts` | `scope (ORG_WIDE/CALLER_SPECIFIC/BOTH/RAW_SOURCE), kind, target_caller_id?, suggested_slug?, extracted_entities[], confidence, reasoning` |
+| `orchestrator` | `voice_turn` | Haiku/Sonnet | `caller, rep_utterance, conversation_history, caller_hits, brain_hits, manager_whispers, decision_updates` | streamed text (with optional `<<TOOL …>>` markers at end) |
+| `summarizer` (v0.2) | `call_ended` | Sonnet | `transcript, caller, started_at, brain_context, provider_summary?` | `discussion, blockers, extracted_entities[], verbatim_quotes[≤10], topics[≤15]` |
+| `web_verifier` (F5) | `post_call_fanout` | Sonnet | `claim, evidence_url?, evidence_text?, fetch_ok` | `status (corroborated/unconfirmed/contradicted), confidence, evidence_snippet?, contradiction_detail?, reasoning` |
+| `dashboard_rollup_writer` (F8) | `dashboard_rollup` | Sonnet | `call_count, top_topics, urgent_flags, missed_decisions[], account_movement[], reps_in_motion[], stub_escalations[]` | `subject_line, sections{yesterday_at_a_glance, decisions_you_missed, account_movement, reps_in_motion, stub_to_real_escalations}` |
+
+### Orchestrator tools
+
+Mid-stream tool calls — the LLM emits `<<TOOL name {json_args}>>` at the
+end of its spoken text; `scan_for_tool_calls` parses + dispatches via
+`ToolRegistry.dispatch()`.
+
+| Tool | Marker args | Bridge text | end_turn | hangup | Side effects |
+|---|---|---|---|---|---|
+| `request_manager_decision` | `{prompt, options[], decision_class (inline/bridged/async), rationale?}` | inline: "Let me check with leadership real quick…" / bridged: "I'll run that by leadership…" / async: "Got it, I'll flag that…" | True for inline/bridged; False for async | False | Creates `DecisionRequest` row; publishes `decision.opened` frame; SMSes Manager via `[DR-XXXXXX]` prefix; schedules `decision_timeout_job` (45s inline / 120s bridged / none for async) |
+| `request_correction` | `{slug, kind (replace_compiled_truth/append_timeline_entry), text, title?, rationale?}` | success: "Got it, I've updated that…" / NotFound: "I don't have a page called '{slug}' yet…" | False on success; True on error | False | `CorrectionService.apply()` — page becomes `manager_authoritative=True` for replace; cascade enqueued |
+| `end_call` | `{reason}` | "Thanks - I've got what I need. Talk soon." | True | True (orchestrator emits hangup_chunk to AP) | AP drops the line |
+
+### Voice turn flow (`app/orchestrator/turn_loop.py`)
+
+```
+1. Load call + workspace + FE; persist caller TranscriptFragment
+2. Speculative retrieval race (150ms deadline):
+   • prewarmed snapshot from Redis (~1ms read; 30min TTL)
+   • fresh: Retriever.for_turn(caller, query) — caller memory single-tag + brain hybrid in parallel
+   • fresh wins → use it; loses → emit BRIDGE_PHRASES chunk + use prewarmed fallback; cache fresh result for next turn
+3. Drain decision_updates (answered / timed_out) from session.pending_decisions
+4. Drain manager_whispers from Redis whispers:{call_id} list
+5. render_messages(workspace, fe, session, context, rep_utterance, decision_updates) → [system, user]
+6. llm.stream_chat() → scan_for_tool_calls():
+   • text → spoken_parts + yield to NDJSON wrapper
+   • tool_call → ToolRegistry.dispatch(ctx, name, args) → ToolResult
+   • bridge_text → yield; end_turn → close; hangup → emit hangup_chunk
+7. token_stream_to_ndjson (first flush 1 char, subsequent 12 chars) → bytes
+8. Persist agent TranscriptFragment; append both turns to session.conversation_history (cap 40); save session via Redis CAS
+```
+
+### SMS turn flow (`app/orchestrator/sms_orchestrator.py`)
+
+Two-path dispatch:
+1. **Decision response** — body starts with `[DR-` → `_handle_decision_response()` (matches Manager SMS replies to open decisions)
+2. **Conversational** — full retrieval (no race, no bridge), non-streaming LLM call, only `request_manager_decision` tool in scope, reply truncated to 1400 chars, persists fragments, sends via `AgentPhoneAdapter.send_sms(agent_id, to_number, body)`
+
+### Prewarm (`app/orchestrator/prewarm.py`)
+
+On first voice webhook for a call: `schedule_prewarm()` fires a background
+task that warms the caller profile (Supermemory) + broad brain snapshot
+(`hybrid_search(query="*", k=20)`) and stashes to Redis at
+`prewarm:call:{call_id}` (30min TTL). Every turn reads this before
+racing fresh retrieval against the 150ms deadline. Fresh result is
+re-stashed after each turn (self-warming cache).
+
+---
+
+## Background workers + mini-agents
+
+### arq worker registry (`app/workers/settings.py`)
+
+Single process runs all queues. Start with `make worker` (=
+`arq app.workers.settings.WorkerSettings`).
+
+**On-demand jobs:**
+- `post_call_job` — fanout after `agent.call_ended`
+- `decision_timeout_job` — fires when an open decision expires
+- `correction_cascade_job` — log + reserved hooks for cache invalidation
+- `action_item_dispatcher_job` — per-workspace handler dispatch
+- `dashboard_rollup_job` — per-workspace daily brief
+- `email_delivery_job` — outbound email
+
+**Cron jobs (Phase 1):**
+- `dashboard_rollup_dispatcher_job` — daily 07:00 UTC, fans out per-workspace
+- `action_item_dispatcher_cron` — every minute, fans out per-workspace
+
+Each on-demand job has an **inline-mode toggle** env var
+(`POST_CALL_INLINE`, `DECISION_TIMEOUT_INLINE`,
+`CORRECTION_CASCADE_INLINE`, `DASHBOARD_ROLLUP_INLINE`) for tests that
+bypass Redis.
+
+### `post_call.py` — post-call fan-out
+
+1. Load Call + transcript + FieldEmployee
+2. Run summarizer skill → `SummarizerOutput`
+3. Save artifact `calls/{call_id}/canonical_summary.json` to object store + `CallArtifact` row
+4. **PARALLEL** (isolated failure domains):
+   - `run_brain_updater` — upsert pages / append timeline / apply web-verifier trust tags
+   - `write_call_to_caller_memory` — Supermemory digest under `[caller_X, workspace_W]`
+   - `web_verifier_fanout` — verify claims (current claim list empty; F5 plumbing in place)
+   - `extract_action_item_candidates` + `save_action_items` — inline, not async
+5. Publish `call.summary_ready` frame with `brain_pages_touched`
+6. Enqueue `email_delivery_job` for opted-in Manager + Rep recipients
+
+### `decision_timeout.py`
+
+When `DecisionService.open()` creates a row with `timeout_at`, schedules
+`dt:{decision_id}` deferred job. On fire: SELECT FOR UPDATE → if still
+`open`, mark `timed_out` + publish `decision.resolved` frame
+(via=timeout). Orchestrator picks it up on next turn via
+`session.pending_decisions` → renders "couldn't reach leadership" cue.
+
+### `correction_cascade.py`
+
+Phase 0 minimum — logs the correction event. Phase 1 hooks reserved for
+caller-profile denormalization, retrieval-cache invalidation, embedding
+recompute.
+
+### `action_item_dispatcher.py` (Phase 1 F3)
+
+Cron fan-out → per-workspace job → query
+`ActionItem(status=approved, handler != none)` (limit 50) → call the
+matching handler:
+
+- `handler="scheduler"` → `SchedulerMiniAgent.execute()` → Google Calendar event (or draft if Google dormant)
+- `handler="email_drafter"` → `EmailDrafterMiniAgent.execute()` → Gmail send (or draft if Google dormant)
+
+Outcome JSON + error + attempt count persisted back to row. Status
+transitions: `approved` → `done` / `failed` / `needs_reconnect` (OAuth
+revoked) / retry (`approved` again until `MAX_HANDLER_ATTEMPTS=3`).
+
+### `dashboard_rollup.py` (Phase 1 F8)
+
+Cron @ 07:00 UTC → enumerate workspaces → enqueue one
+`dashboard_rollup_job` per workspace for yesterday. Per-workspace job
+calls `run_dashboard_rollup` mini-agent (see below).
+
+### `email_delivery.py` (Phase 1 F6)
+
+Thin shim calling `run(EmailDeliveryInput)` mini-agent.
+
+### Mini-agents (`app/miniagents/`)
+
+| Mini-agent | Input → Output | Side effects |
+|---|---|---|
+| `summarizer_agent.run_summarizer` | `SummarizerInput(transcript, caller, brain_context)` → `SummarizerOutput(discussion, blockers, entities, quotes, topics)` | None (caller persists the artifact) |
+| `brain_updater.run_brain_updater` | `BrainUpdateInput(summary, verdicts?)` → `BrainUpdateResult(pages_upserted, timeline_appends, needs_review, tags_applied)` | Brain page upserts / timeline appends; provenance row; trust tag application; `ManagerAuthoritativeConflict` → needs_review |
+| `caller_memory_writer.write_call_to_caller_memory` | call + FE + transcript + summary | Supermemory `add()` with `[caller_X, workspace_W]` tags |
+| `email_drafter.EmailDrafterMiniAgent.execute` (F3) | `EmailDrafterContext` + `ActionItem` → `{message_id, thread_id, draft, sent_to, error?}` | Render `email_drafter_message.j2`; Gmail send via `GoogleWorkspaceConnector.gmail_send()` (skipped if Google dormant) |
+| `email_delivery.run` (F6) | `EmailDeliveryInput(workspace_id, trigger_kind, trigger_ref_id, recipient, delivery_route, precomposed?)` → `EmailDeliveryResult(skipped?, reason?)` | Compose (or use precomposed) → send via AgentMail or OAuth personal Gmail → persist `EmailMessage` audit row with `correlation_idempotency_key` |
+| `email_reply_handler.handle_event` (F6) | `AgentMailEvent` | Routes by sender: Manager → `CorrectionIntake` (origin=`manager_email_reply`); FE → `IntakeBufferItem` (source=`rep_email_followup`); else drop |
+| `scheduler.SchedulerMiniAgent.execute` (F3) | `SchedulerContext` + `ActionItem` → `{provider_event_id, calendar_id, event_html_link, draft, error?}` | Render `scheduler_event.j2`; create Calendar event (skipped if Google dormant) |
+| `web_verifier.web_verifier_fanout` (F5) | `(workspace_id, call_id, claims[])` → `[VerificationVerdict]` | Per-claim: freshness reuse → URL planning → fetch via `BrowserSession` → `web_verifier` skill adjudicates → `ClaimVerification` row + `CorrectionIntake` (if contradicted) |
+| `dashboard_rollup.run_dashboard_rollup` (F8) | `DashboardRollupInput(workspace_id, brief_date)` → `DashboardRollupResult(brief_artifact_id, snapshots_written)` | `compute_aggregate` → render via `dashboard_rollup_writer` skill (fallback to skeleton) → write brief artifact JSON to object store → `write_snapshots` (per-dimension rows) → stamp overview metadata → `mark_decisions_surfaced` → enqueue `email_delivery_job` if opted in |
+
+---
+
+## Services layer
+
+### `auth_service.py` — `AuthService`
+
+| Method | Purpose |
+|---|---|
+| `login(email, password)` | Hash-verify password, issue access + refresh JWT pair |
+| `refresh(refresh_token_str)` | Rotate token chain; revoke consumed; **commit** before returning (otherwise `app_session()` rolls back the revoke); reuse → revoke whole chain |
+| `logout(refresh_token_str)` | Revoke token; commit (same reason) |
+| `_issue_pair(user, parent_jti?)` | Generate access + refresh JWT; record refresh row with jti + expiry |
+
+Module-level helper: `ensure_email_available(session, email)` raises
+`Conflict` if email taken.
+
+### `workspace_provisioning.py` — `WorkspaceProvisioningService`
+
+| Method | Purpose |
+|---|---|
+| `signup(email, password, workspace_name)` | Create Org + Workspace + User in one transaction → then `_provision_externals(ws)` (best-effort, doesn't roll back DB) |
+| `_provision_externals(ws)` | AP `provision_number()` → brain `ensure_schema()` → memory `ensure_namespace()` → AgentMail `provision_workspace_inbox()`; state transitions `pending` → `number_pending` → `ready` |
+
+### Intake services
+
+- **`intake_processor.py:IntakeProcessor`** — `submit_text`, `submit_upload`, `get`, `list`, `download_url`, `supersede`, `soft_delete`. Dedup by SHA256 on upload. Max upload 25 MB.
+- **`intake_processing.py:process_intake_item(item_id, session, storage)`** — extract → classify (skill) → confidence gate (0.7) → resolve handler → ingest. Idempotent.
+- **`intake_extractors/`** — 6 concrete extractors (`pdf`, `docx`, `xlsx`, `csv`, `json`, `text`) registered into `_ExtractorRegistry`; resolve by MIME → extension fallback; raises `UnsupportedFormat` otherwise. Each returns `ExtractedContent(text, rows, tables, metadata, warnings)`.
+- **`intake_handlers.py`** — 4 scope-typed handlers:
+  - `OrgBrainHandler` (`ORG_WIDE`) — upsert brain page (account/product/playbook/theme/org_positioning)
+  - `CallerBrainHandler` (`CALLER_SPECIFIC`) — provenance only in Phase 0 (Supermemory write lands Phase 1)
+  - `CrossRefHandler` (`BOTH`) — delegates to org handler; directed BrainEdge in Phase 1
+  - `RawSourceHandler` (`RAW_SOURCE`) — one page per extracted entity (capped 25)
+
+  `ManagerAuthoritativeConflict` → append timeline entry instead, flag `needs_review`.
+
+### `decisions.py` — `DecisionService`
+
+| Method | Purpose |
+|---|---|
+| `open(call_id, workspace_id, prompt, options, decision_class, context?, manager_phone?, agentphone_agent_id?)` | Create `DecisionRequest`; publish `decision.opened`; SMS Manager `[DR-XXXXXX] <prompt>`; schedule timeout (45s inline / 120s bridged / none async) |
+| `respond(decision_id, responder_user_id, response, via)` | SELECT FOR UPDATE → mark answered → publish `decision.resolved`; raises `Conflict` if already resolved |
+| `match_sms_response(body, manager_user_id)` | Parse `[DR-XXXXXX] <option>` from inbound SMS → call `respond()` |
+
+### `corrections.py` — `CorrectionService`
+
+| `kind` | Effect | Manager-authoritative guard |
+|---|---|---|
+| `REPLACE_COMPILED_TRUTH` | Upsert page; mark `manager_authoritative=True`; new version on chain | Sets the flag; future auto-extractors can't silently overwrite |
+| `SOFT_DELETE_PAGE` | Append delete audit timeline → `brain.soft_delete_page()` | — |
+| `APPEND_TIMELINE_ENTRY` | Timeline append only; no version bump | — |
+
+Provenance row created BEFORE applying. `correction_cascade` job
+enqueued for replace/delete.
+
+### `correction_intake.py` — `open_correction_intake(...)`
+
+Opens a `CorrectionIntake` row for Manager review before
+`CorrectionService.apply()` runs. Origins: `system_web_verifier` (F5
+contradiction), `manager_email_reply` (F6 inbound).
+
+### `action_items/`
+
+- **`heuristic_extractor.py:extract_action_item_candidates(blockers, transcript_turns)`** — regex heuristics on transcript turns + blocker text. Confidence 0.6 (blockers) / 0.7 (transcript). Inferred handler from `scheduler` / `email` hints.
+- **`save.py:save_action_items(session, call, candidates)`** — persists each as `ActionItem(status="pending_approval")`.
+
+### `dashboards/aggregator.py` (F8)
+
+Per-day aggregation queries:
+- **`compute_aggregate(session, workspace_id, brief_date)`** — read-only roll-up across `Call`, `DecisionRequest`, `FieldEmployee`, `ManagerWorkspace` → returns dict for skill input
+- **`write_snapshots(session, agg, computed_at)`** — one `DashboardSnapshot` row per dimension (overview, rep, account, theme, decision)
+- **`mark_decisions_surfaced(session, decision_ids, at)`** — sets `surfaced_in_brief_at` so each missed decision appears in only one brief
+
+### `web_verifier/browser_client.py` (F5)
+
+`browser_session(name, timeout_ms)` context manager →
+`BrowserSession.fetch_page(url)` returns `PageFetchResult(ok, url, text,
+error)`. httpx + regex HTML strip; text capped at 20k chars.
+`BROWSER_USE_API_KEY` is detected but the real SDK isn't wired yet.
+
+---
+
+## Database models + migrations
+
+### Models (`app/db/models/`) — Phase 0
+
+| Model file | Table | Purpose |
+|---|---|---|
+| `organization.py` | `organizations` | Top-level container; auto-created at Manager signup |
+| `user.py` | `users` | Auth principal; role ∈ (`manager`, `org_admin`, `rep`, `viewer`); `field_employee_id` reverse-links to roster |
+| `workspace.py` | `manager_workspaces` | Isolation unit. Columns: `primary_number` (UNIQUE), `agentphone_agent_id/_number_id`, `provisioning_state`, plus Phase 1 `email_inbox_id/_addr`, `email_domain` |
+| `refresh_token.py` | `refresh_tokens` | JWT rotation chain. `jti` (UNIQUE), `parent_jti` (indexed), `revoked_at`, `revoked_reason`. Powers reuse detection |
+| `intake.py` | `intake_buffer_items` | Manager intake pipeline. `source ∈ (form, upload, voice_intake, correction, rep_email_followup)`; `status` lifecycle |
+| `field_employee.py` | `field_employees` | Rep roster. `(workspace_id, phone)` UNIQUE; `profiled` bool; `profile` JSONB |
+| `call.py` | `calls` | Phone-call lifecycle. `agentphone_call_id` UNIQUE; `status ∈ (ringing, in_progress, ended, failed)` |
+| `transcript.py` | `transcript_fragments` | One row per speaker turn. `seq` monotonic per call; `UNIQUE(call_id, seq)` |
+| `decision.py` | `decision_requests` | Mid-call decision asks. `decision_class ∈ (inline, bridged, async)`; `status ∈ (open, answered, answered_late, timed_out, cancelled)`; `surfaced_in_brief_at` for F8 dedupe |
+| `provenance.py` | `provenance` | Audit row attached to every brain write. `source_type ∈ (manager_form, …, manager_correction, field_call, automated_extraction, external_research, system_seed)` |
+| `call_artifact.py` | `call_artifacts` | Metadata for blobs in object store. `kind ∈ (canonical_summary, transcript, recording, provider_summary, action_items_export, action_item_handler_outcome, daily_brief)` |
+
+### Models added in Phase 1 (migration 0010)
+
+| Model file | Table | Purpose |
+|---|---|---|
+| `correction_intake.py` | `correction_intakes` | Pre-correction queue. `origin ∈ (manager, rep_callback, system_web_verifier, manager_email_reply)`; `status ∈ (open, applied, rejected, dismissed)` |
+| `action_item.py` | `action_items` | F3 tasks. `status ∈ (pending_approval, needs_review, approved, done, failed, needs_reconnect, rejected)`; `handler ∈ (scheduler, email_drafter, none)` |
+| `manager_intervention.py` | `manager_interventions` | F7 whisper records. `mode ∈ (whisper)`; `started_at, ended_at, payload` |
+| `claim_verification.py` | `claim_verifications` | F5 fact-checks. `status ∈ (corroborated, unconfirmed, contradicted)`; FK to `correction_intakes` when contradicted |
+| `email_message.py` | `email_messages` | F6 audit. `provider ∈ (agentmail, oauth_personal)`; `trigger_kind ∈ (post_call_summary, daily_brief, missed_decisions, action_item_handler)`; `correlation_idempotency_key` UNIQUE |
+| `oauth_credentials.py` | `workspace_oauth_credentials` | F9 OAuth tokens. `provider ∈ (google_workspace)`; refresh + access tokens plaintext (per LLD speed variant) |
+| `dashboard.py` | `dashboard_snapshots` | F8 metrics rollup. `dimension ∈ (overview, rep, account, theme, decision)`; opaque JSONB `metrics`; composite index `(workspace_id, snapshot_date, dimension)` |
+| `dashboard.py` | `saved_dashboard_queries` | F8 pinned filters (max 10/user) |
+
+### Repositories (`app/db/repositories/`)
+
+| Repo | Notable methods |
+|---|---|
+| `users_repo.py` | `get_by_id`, `get_by_email`, `create` |
+| `workspaces_repo.py` | `create`, `get_by_id`, `get_by_primary_number`, `get_by_agentphone_agent_id`, `get_by_agentphone_number_id`, `update_provisioning`, `get_manager_email`, `get_by_email_inbox_id`, `update_email_inbox` |
+| `field_employees_repo.py` | `get`, `find_by_phone`, `get_by_email`, `create_unprofiled` |
+| `refresh_tokens_repo.py` | `record`, `get_by_jti`, `revoke`, `revoke_user_chain` |
+| `intake_repo.py` | `find_by_sha`, `create`, `get`, `list_for_workspace`, `update_status`, `mark_superseded`, `soft_delete` |
+| `calls_repo.py` | `get`, `get_by_agentphone_id`, `list_in_progress`, `list_for_workspace`, `create`, `mark_ended` |
+| `transcripts_repo.py` | `append`, `list_for_call` |
+| `decisions_repo.py` | `get`, `lock_for_update`, `create`, `mark_answered`, `mark_timed_out`, `list_for_workspace`, `list_open_for_user`, `list_missed_for_brief`, `mark_surfaced_in_brief` |
+| `provenance_repo.py` | `create`, `get` |
+| `call_artifacts_repo.py` | `create`, `get_by_kind`, `list_for_call` |
+| `action_items_repo.py` | `create`, `get`, `list_for_workspace`, `update_status`, `update_handler_outcome`, `list_approved_with_handler` |
+| `manager_interventions_repo.py` | `create`, `get`, `list_for_call`, `mark_consumed` |
+| `claim_verifications_repo.py` | `create`, `list_for_call`, `list_for_claim_subject`, `find_existing_corroborated` (freshness reuse) |
+| `email_messages_repo.py` | `create`, `exists_by_idem`, `find_by_provider_message_ids`, `list_for_workspace` |
+| `oauth_credentials_repo.py` | `create`, `get`, `get_for_workspace`, `get_active`, `list_all_for_workspace`, `update_tokens`, `mark_revoked`, `to_public` |
+| `dashboards_repo.py` | `bulk_create`, `list_for_range`, `get_for_date` (snapshots); `create`, `list_for_workspace`, `delete`, `count_pinned` (saved queries) |
+
+### Sessions
+
+- **`app/db/app_session.py`** — `app_session()` async context manager around `_factory()()`; engine cached via `@lru_cache`; `pool_pre_ping=True`
+- **`app/db/brain_session.py`** — `brain_session(workspace_id)` pins `search_path` to `brain_w_{workspace_id.hex}` via `SET LOCAL search_path` — workspace isolation enforced at session init
+
+### Migration revisions
+
+**App DB (`versions_app/`):**
+1. `0001_initial` — orgs, manager_workspaces, users
+2. `0002_refresh_tokens` — rotation chain + reuse detection
+3. `0003_intake_buffer_items` — intake pipeline (FK name shortened to fit 63-char limit)
+4. `0004_field_employees_and_calls` — Rep roster + Call rows
+5. `0005_transcript_fragments` — per-turn rows
+6. `0006_decision_requests` — decision lifecycle
+7. `0007_provenance` — brain-write audit
+8. `0008_call_artifacts` — blob metadata
+9. `0009_drop_field_employee_supermemory_user_id` — Supermemory isolation moves to containerTags
+10. `0010_phase_1_unified` — 8 new tables (correction_intakes, action_items, manager_interventions, claim_verifications, email_messages, workspace_oauth_credentials, dashboard_snapshots, saved_dashboard_queries) + columns on manager_workspaces (email_inbox_id, _addr, email_domain) + CHECK widening on existing enums
+
+**Brain DB (`versions_brain/`):**
+1. `0001_initial_brain` — `CREATE EXTENSION vector` (per-workspace schemas created at runtime by `BrainProvider.ensure_schema()`)
 
 ---
 
 ## Running the production container locally
 
-`Dockerfile` is a two-stage build (uv → `python:3.12-slim`) that
-produces a single image used for both the web API and the arq worker
-(worker overrides `CMD`). `docker-compose.yml` wires it up against the
-same Postgres/Redis/MinIO compose stack used for dev, plus a one-shot
-`migrate` service that web + worker `depends_on`.
+`Dockerfile` is a two-stage build (uv → `python:3.12-slim`) producing
+one image used for both web + worker (worker overrides CMD).
+`docker-compose.yml` wires it up against the same infra stack plus a
+one-shot `migrate` service.
 
 ```bash
-# Reuse .env.local for defaults. JWT_SECRET is required.
 docker compose --env-file .env.local up --build
 ```
 
-| Service       | Image                       | Purpose                                                  |
-|---------------|-----------------------------|----------------------------------------------------------|
-| `postgres`    | `pgvector/pgvector:pg16`    | hosts both `votf_app` and `votf_brain` (pgvector ready)  |
-| `redis`       | `redis:7-alpine`            | session store, pub/sub bus, arq queue                    |
-| `minio`       | `minio/minio`               | S3-compat object store                                   |
-| `minio-init`  | `minio/mc`                  | one-shot: creates the bucket on first boot               |
-| `migrate`     | `vof-backend:local`         | one-shot: `alembic upgrade head` for both DBs            |
-| `web`         | `vof-backend:local`         | uvicorn on `:8000`, health at `/health`                  |
-| `worker`      | `vof-backend:local`         | `arq app.workers.settings.WorkerSettings`                |
+| Service | Image | Purpose |
+|---|---|---|
+| `postgres` | `pgvector/pgvector:pg16` | hosts both `votf_app` and `votf_brain` |
+| `redis` | `redis:7-alpine` | session, pub/sub, arq |
+| `minio` + `minio-init` | `minio/minio` + `minio/mc` | S3-compat + auto-bucket |
+| `migrate` | `vof-backend:local` | one-shot `alembic upgrade head` for both DBs |
+| `web` | `vof-backend:local` | uvicorn :8000, `/health` |
+| `worker` | `vof-backend:local` | `arq app.workers.settings.WorkerSettings` |
 
-```bash
-docker compose logs -f web                   # tail one service
-docker compose run --rm migrate              # re-run migrations
-docker compose exec web sh                   # shell in container
-docker compose down                          # stop (keeps volumes)
-docker compose down -v                       # stop + wipe DB/object data
-```
-
-### What's in the image
-
-- the resolved venv at `/app/.venv` (built from `uv.lock`, no dev deps)
-- the `app/` Python package
-- the `skills/` directory (loaded at startup by `app.skills.loader`)
-- the `scripts/` directory (Alembic wrapper, seed scripts)
-- `alembic.ini` + `alembic-brain.ini`
-
-**Not** in the image: `tests/`, `smoke/`, `hld/`, `lld/`. See
-`.dockerignore`. The image runs as non-root `votf` (UID 1000) with a
-`HEALTHCHECK` against `/health`.
+Image contains: `/app/.venv` (resolved from `uv.lock`, no dev deps),
+`app/`, `skills/`, `scripts/`, both alembic configs. **Not in image:**
+`tests/`, `smoke/`, `hld/`, `lld/`. Runs as non-root `votf` (UID 1000)
+with `HEALTHCHECK` on `/health`.
 
 ### Environment contract (production)
 
-Required for the runtime container:
+Required:
 
-| Var                              | Notes                                                              |
-|----------------------------------|--------------------------------------------------------------------|
-| `DATABASE_URL`                   | `postgresql+asyncpg://…/votf_app`                                  |
-| `BRAIN_DATABASE_URL`             | `postgresql+asyncpg://…/votf_brain` (pgvector required)            |
-| `REDIS_URL`                      | shared by session store, pub/sub, arq                              |
-| `S3_BUCKET` + `S3_ACCESS_KEY` + `S3_SECRET_KEY` + `S3_REGION` | omit `S3_ENDPOINT_URL` for AWS S3; set it for R2 / MinIO |
-| `JWT_SECRET`                     | ≥32 bytes, rotate per environment                                  |
-| `AGENTPHONE_API_KEY` + `AGENTPHONE_WEBHOOK_SECRET` | empty → `FakeTelephonyProvider` (fake numbers at signup) |
-| `SUPERMEMORY_API_KEY`            | empty → `StubCallerMemoryProvider` (writes return synthetic ids)   |
-| `LLM_PROVIDER`                   | `openai_compat` or `bedrock`                                       |
-| `LLM_API_KEY` / `ANTHROPIC_API_KEY` | required per provider (see § LLM provider table)                |
-| `LLM_DEFAULT_MODEL` / `LLM_MODEL` | model IDs match the provider's format                             |
-| `AWS_REGION`                     | required when `LLM_PROVIDER=bedrock`                               |
-| `DEPLOYMENT_PROFILE`             | `cloud` for prod, `local` for dev (with `S3_ENDPOINT_URL`)         |
-| `AGENTMAIL_API_KEY`              | **optional** — empty disables email surface (see § Optional integrations) |
-| `EMAIL_DOMAIN`                   | optional custom email domain                                       |
-| `BROWSER_USE_API_KEY`            | **optional** — falls back to httpx + regex stripper                |
-
-Empty third-party keys log a warning at startup and bind a fake/stub
-provider. Safe for local prod-image validation, **not for production
-voice** — `make smoke` against the deployed environment is the gate.
-
-### Webhook reachability
-
-AgentPhone and AgentMail can't reach `localhost`. For local validation
-of the production container against real services, expose port 8000 via
-a tunnel and register a **per-agent webhook** for AgentPhone (see
-[Live end-to-end testing](#live-end-to-end-testing-real-phone-call)).
-In production, deploy behind a TLS terminator (Cloud Run, Fly.io,
-nginx + cert-manager) and use that URL.
+| Var | Notes |
+|---|---|
+| `DATABASE_URL`, `BRAIN_DATABASE_URL` | `postgresql+asyncpg://…` |
+| `REDIS_URL` | shared by session, pub/sub, arq |
+| `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | omit `S3_ENDPOINT_URL` for AWS S3 |
+| `JWT_SECRET` | ≥32 bytes, rotate per environment |
+| `LLM_PROVIDER` + provider-specific keys | see § LLM provider |
+| `AGENTPHONE_API_KEY`, `AGENTPHONE_WEBHOOK_SECRET` | empty → `FakeTelephonyProvider` |
+| `SUPERMEMORY_API_KEY` | empty → `StubCallerMemoryProvider` |
+| `AGENTMAIL_API_KEY` | **optional** — empty disables F6 |
+| `BROWSER_USE_API_KEY` | **optional** — F5 falls back to httpx |
+| `EMAIL_DOMAIN` | optional custom email domain |
+| `DEPLOYMENT_PROFILE` | `cloud` for prod, `local` for dev with MinIO |
 
 ---
 
 ## Smoke tests — per-integration verification
 
-The `smoke/` framework proves that the deployment can reach every
-service it depends on AND that every contract behaves as expected.
-Each probe is **fully independent** — no probe imports another, no
-probe shares in-memory state with another, and every probe namespaces
-its scratch resources with random UUIDs so concurrent runs don't
-collide.
+7 probes (`smoke/`). Each is fully independent (no cross-probe imports,
+no shared state, UUID-namespaced scratch resources).
 
-### What the smoke framework covers
+| Probe | Verifies |
+|---|---|
+| `postgres_app` | connect, transaction isolation, CRUD round-trip |
+| `postgres_brain` | connect, pgvector + tsvector, schema-per-Workspace lifecycle, vector + tsvector round-trip |
+| `redis` | connect, set/get, pub/sub round-trip, dedupe-set + TTL |
+| `object_storage` | bucket reachable, PUT/GET/DELETE, signed-URL, prefix isolation |
+| `llm` | auth, basic completion, **streaming**, **JSON mode**, **tool calls** — branches between OpenAI-compat (HTTP) and Bedrock (`boto3.invoke_model`) on `LLM_PROVIDER` |
+| `supermemory` | auth, write/search/profile, **per-caller isolation** via single-tag search, OR-semantic tripwire, indexing-lag-aware (30s polling window) |
+| `agentphone` | auth, master webhook, **HMAC round-trip through prod verifier**, test webhook delivery, outbound SMS, `PATCH /conversations/{id}` metadata round-trip |
 
-| # | Probe                  | Verifies                                                                       |
-|---|------------------------|--------------------------------------------------------------------------------|
-| 1 | `smoke.postgres_app`   | connect, transaction isolation, CRUD round-trip                                |
-| 2 | `smoke.postgres_brain` | connect, pgvector + tsvector present, schema-per-Workspace lifecycle, vector + tsvector round-trip |
-| 3 | `smoke.redis`          | connect, set/get, pub/sub round-trip, dedupe-set + TTL                         |
-| 4 | `smoke.object_storage` | bucket reachable, PUT/GET/DELETE, signed-URL generation, prefix isolation      |
-| 5 | `smoke.llm`            | auth, basic completion, **streaming**, **JSON mode**, **tool calls** — branches between OpenAI-compat (HTTP) and Bedrock (`boto3.invoke_model`) based on `LLM_PROVIDER` |
-| 6 | `smoke.supermemory`    | auth, write/search/profile, **per-caller isolation** via single-tag search, OR-semantic tripwire, indexing-lag-aware (30s polling window) |
-| 7 | `smoke.agentphone`     | auth, master webhook configured, **HMAC round-trip through the production verifier**, test webhook delivery, outbound SMS, `PATCH /conversations/{id}` metadata round-trip |
+> Phase 1 third-parties (AgentMail, Browser Use) don't have smoke
+> probes yet — they're optional and the production code degrades
+> cleanly when empty.
 
-> Phase 1 third-parties (AgentMail, Browser Use) don't have smoke probes
-> yet — they're optional and the production code degrades cleanly when
-> empty, so a missing probe doesn't block deployment. Worth adding if/when
-> you depend on those surfaces for critical flows.
+### Modes + exit codes
 
-### Three operating modes + four exit codes
+| Mode | Flag | What | Cost |
+|---|---|---|---|
+| Check (default) | `--mode check` | auth + connectivity | free/cents |
+| Smoke | `--mode smoke` | every feature | $0.05–0.20 + 1 SMS |
+| Repair | `--mode repair` | smoke + verbose diagnostics | same |
 
-| Mode       | Flag (default `check`)  | What runs                                  | Cost           | When                          |
-|------------|-------------------------|--------------------------------------------|----------------|-------------------------------|
-| **Check**  | `--mode check`          | auth + connectivity only                   | free / cents   | every push, CI pre-flight     |
-| **Smoke**  | `--mode smoke`          | every feature VotF actually uses           | $0.05–0.20 + 1 SMS | pre-release, post-incident |
-| **Repair** | `--mode repair`         | smoke + verbose diagnostics on failure     | same as smoke  | when debugging                |
-
-| Code | Meaning                                  | What to do                                   |
-|------|------------------------------------------|----------------------------------------------|
-| `0`  | **PASS**                                 | proceed                                      |
-| `1`  | **FAIL** — config/contract broken        | read the `fix:` hint on the failed check     |
-| `2`  | **CONFIG** — required env vars missing   | source `.env.local`; missing vars are listed |
-| `3`  | **UPSTREAM** — the third-party is down   | check the provider's status page             |
-
-### Run everything
+| Exit | Meaning |
+|---|---|
+| 0 | PASS |
+| 1 | FAIL (config/contract broken) |
+| 2 | CONFIG (env vars missing) |
+| 3 | UPSTREAM (third-party down) |
 
 ```bash
-set -a && source .env.local && set +a
+make smoke         # cheap connectivity, ~2s
+make smoke-full    # exercise every feature, ~30s
+make smoke-repair PROBE=postgres_brain   # verbose diagnostics for one
 
-# Cheap: connectivity-only across all 7 probes (~2s)
-make smoke
-
-# Thorough: exercises every feature (~30s, $0.05-0.20, 1 SMS)
-make smoke-full
+# Single probe directly
+uv run python -m smoke.<name> --mode {check|smoke|repair}
 ```
 
-Aggregator output ends with a single grep-friendly summary line:
-
-```
-SMOKE_SUMMARY mode=smoke probes=7 pass=7 fail=0 config_error=0 upstream_down=0 duration_ms=18432
-```
-
-Exit code is the worst result across all probes.
-
-### Run a single probe
-
-```bash
-uv run python -m smoke.postgres_app   --mode check
-uv run python -m smoke.postgres_brain --mode smoke
-uv run python -m smoke.redis          --mode smoke
-uv run python -m smoke.object_storage --mode smoke
-uv run python -m smoke.llm            --mode smoke   # branches on LLM_PROVIDER
-uv run python -m smoke.supermemory    --mode smoke
-uv run python -m smoke.agentphone     --mode smoke
-```
-
-### Per-probe independence — enforced, not just claimed
-
-- **No cross-probe imports.** The only `app.*` import in `smoke/` is
-  `app.security.hmac` from `smoke.agentphone` — load-bearing because the
-  HMAC round-trip must use the production verifier.
-- **No shared in-memory state.** Each probe is its own subprocess.
-- **No external-state collisions.** Every probe namespaces by random
-  UUID: `_smoke_probe` table (postgres_app), `brain_w_smoketest_<uuid>`
-  schema (postgres_brain), `_smoke:*` keys (redis), `_smoke_probe/<uuid>`
-  keys (object storage), synthetic UUIDs in container_tags
-  (supermemory). The AgentPhone probe uses operator-pinned test
-  resources (intentionally shared).
-
-### Output format
-
-- **stdout** — one JSON line (the `ProbeReport`) — machine-readable, pipeable.
-- **stderr** — colorized human-readable lines with
-  `[PASS]`/`[FAIL]`/`[CONFIG]`/`[UPSTREAM]` tags and `fix:` hints.
-
-Secrets are redacted in all output (any env var ending in `_KEY`,
-`_SECRET`, `_PASSWORD`, or `_TOKEN`).
-
-### Adding a new probe
-
-Drop a file in `smoke/<name>.py` extending `Probe`, declare `name` +
-`required_env: ClassVar[list[str]]`, implement `checks_for_mode()`. Add
-an entry to `smoke/manifests/probes.yaml`. The runner discovers it
-automatically. See `smoke/postgres_app.py` for the shortest reference
-implementation (~80 lines).
+stdout: one JSON line per probe (machine-readable). stderr: colorized
+`[PASS]`/`[FAIL]`/`[CONFIG]`/`[UPSTREAM]` + `fix:` hints. Secrets
+redacted (any var ending `_KEY/_SECRET/_PASSWORD/_TOKEN`).
 
 ---
 
 ## Unit + integration tests
 
-### Unit tests — `tests/unit/` (173 tests)
-
-Fast, no external services. Settings are bound to safe defaults in
-`tests/conftest.py` so importing the app never touches your real
-config. Tests that need an HTTP surface use the `app_client` fixture
-(httpx `ASGITransport`, bypasses sockets entirely). Tests that need a
-provider override use `app.dependency_overrides` or `set_llm_client()`.
+### Unit (`tests/unit/`, 173 tests)
 
 ```bash
-make test        # uv run pytest tests/unit -q
+make test
 ```
 
-Coverage snapshot:
+Fast, no external services. Safe env defaults in `tests/conftest.py`;
+`app_client` fixture uses httpx `ASGITransport`; provider overrides via
+`app.dependency_overrides` or `set_llm_client()`.
 
-| Area | What it tests |
-|---|---|
-| JWT / hashing / HMAC | token round-trip, bcrypt with SHA-256 prehash, AP HMAC verifier |
-| LLM clients | OpenAI-compat SSE parsing + FakeLLMClient + **BedrockMessagesClient** (system-message hoisting, body shape, `anthropic_version` pinning, factory branching) |
-| **Client-caching contracts** | every adapter (OpenAI-compat, Bedrock, AgentPhone, Supermemory, S3) — verifies consecutive `_get_client()` calls return the **same** instance |
-| Streaming / tool dispatch | NDJSON wrapper, `<<TOOL …>>` marker scanner, mid-stream dispatch |
-| Skill loader | SKILL.md frontmatter parsing, model registration |
-| Memory + container tags | tag scheme, writer wiring, **single-tag retrieval (post-OR-fix)** |
-| Post-call writeback | brain_updater stub-vs-append, caller_memory_writer, frame shapes |
-| Webhook endpoint | HMAC + replay + dedupe + parse + dispatch |
-| Decisions | SMS prefix matching, first-responder-wins, timeout job |
-| Corrections | replace_compiled_truth, soft_delete_page, append_timeline_entry |
-| WS endpoint + frames | one-time auth tokens, frame shapes |
-| Intake | classifier/extractor handlers (PDF/DOCX/XLSX/CSV/JSON/text/MD) |
-| AgentPhone adapter | webhook parsing for every event type |
-| Settings + models | safe defaults, model metadata |
+Covers: JWT/hashing/HMAC, LLM clients (OpenAI-compat SSE + Bedrock
+body shape + factory branching), **client-caching contracts** (every
+adapter returns same `_get_client()` instance), streaming + tool
+dispatch, skill loader, memory + container tags (**single-tag
+retrieval**), post-call writeback, webhook endpoint, decisions,
+corrections, WS frames, intake handlers (all 6 extractors), AgentPhone
+adapter, settings + models.
 
-### Integration tests — `tests/integration/` (5 files)
-
-Tier-2 tests against a real Postgres + Redis. They run against the same
-`docker-compose.local.yml` stack used for dev.
+### Integration (`tests/integration/`, 5 files)
 
 ```bash
-make compose-up
+make compose-up && make migrate
 set -a && source .env.local && set +a
-make migrate
 make integration
 ```
 
-Per-test isolation: `tests/integration/conftest.py` has an autouse
-`_truncate_app_db_between_tests` fixture that truncates every
-non-Alembic table with `RESTART IDENTITY CASCADE` before each test AND
-clears the cached SQLAlchemy engine factories (so each test gets an
-engine bound to its own pytest-asyncio event loop). If Postgres isn't
-reachable the whole suite is skipped, not failed.
+Autouse fixture per test: truncate every non-Alembic table + clear
+SQLAlchemy engine cache (so each test gets an engine bound to its own
+pytest-asyncio event loop). If Postgres unreachable → suite is skipped,
+not failed.
 
-| File                              | Covers                                                   |
-|-----------------------------------|----------------------------------------------------------|
-| `test_migrations.py`              | runs real Alembic migrations against compose Postgres (down → up → down → up to leave schema intact for subsequent tests) |
-| `test_signup_and_auth.py`         | signup → login → /me → refresh (rotation) → logout (revocation) |
-| `test_hierarchy_guard.py`         | Workspace / FieldEmployee / Manager scope enforcement    |
-| `test_ws_live.py`                 | multi-call WS bus: connect, auth, publish, drop          |
-| `test_onboarding_and_intake.py`   | end-to-end onboarding via real services: signup → workspace re-stamp → rep added → sales/car intake ingested |
+| File | Covers |
+|---|---|
+| `test_migrations.py` | Alembic up/down/up cycle; leaves schema at head |
+| `test_signup_and_auth.py` | signup → login → /me → refresh (rotation) → logout (revocation) |
+| `test_hierarchy_guard.py` | Workspace / FieldEmployee / Manager scope enforcement |
+| `test_ws_live.py` | multi-call WS bus: connect, auth, publish, drop |
+| `test_onboarding_and_intake.py` | end-to-end onboarding via real services: signup → workspace re-stamp → rep added → sales/car intake ingested |
 
 ### Session finalizer — `_reseed_for_live_calls`
 
-`tests/integration/conftest.py` has a **session-scope autouse
-finalizer** that re-runs the production onboarding flow after every
-per-test truncate completes. Net effect: after `make integration`
-finishes, the DB is left with:
+After every per-test truncate completes, `tests/integration/conftest.py`
+re-runs the production onboarding flow. Net effect after `make
+integration`:
 
-- One Organization (`VotF`) + Manager (`manager@votf-prod.com`)
-- One Workspace at `primary_number = +14783304859` (the AP test number)
-- One FieldEmployee at `+17653506634`
-- The sales/car onboarding intake item, `status = ingested`
+- Organization (`VotF`) + Manager (`manager@votf-prod.com`)
+- Workspace at `primary_number = +14783304859`
+- FieldEmployee at `+17653506634`
+- Sales/car onboarding intake item (`status = ingested`)
 
-So you can dial `+14783304859` immediately after a test run without
-re-seeding. The finalizer disposes the SQLAlchemy engine cache before
-its `asyncio.run()` so pytest-asyncio's stale connections don't pollute
-the seed.
-
-### When to use which tier
-
-| Question                                       | Layer            |
-|------------------------------------------------|------------------|
-| Does this pure function do the right thing?    | unit             |
-| Does this provider's protocol behave correctly? | unit (with fake) |
-| Does the DB schema work + API contract round-trip? | integration   |
-| Is the orchestrator hot path within latency budget? | load / verify-hot-path |
-| Can the deployed environment reach every dep?  | smoke (not pytest) |
+So you can dial `+14783304859` immediately after a test run. The
+finalizer disposes the engine cache before its `asyncio.run()` so
+pytest-asyncio's stale connections don't pollute the seed.
 
 ---
 
 ## Seeding a Workspace into the DB
 
-`scripts/seed_test_workspace.py` writes the minimum rows needed for an
-inbound call to route through the orchestrator. Two modes:
+`scripts/seed_test_workspace.py` writes the minimum rows for an inbound
+call to route through the orchestrator.
 
-### Workspace-only (production-style — many different callers)
-
-Omit `--caller-number`. The dispatcher
-(`app/telephony/dispatcher.py`) auto-creates an unprofiled
-`FieldEmployee` for each new caller phone on first inbound voice turn,
-so callers don't need to be pre-registered.
-
+**Workspace-only (production-style — many callers):**
 ```bash
-set -a && source .env.local && set +a
 uv run python -m scripts.seed_test_workspace \
   --ap-number +14783304859 \
   --org-name "Acme Corp" \
@@ -801,11 +947,10 @@ uv run python -m scripts.seed_test_workspace \
   --manager-email "manager@acme.example.com"
 ```
 
-### Workspace + one known caller (test-style — same caller dials repeatedly)
+Dispatcher auto-creates an unprofiled `FieldEmployee` for each new
+caller phone on first inbound voice turn.
 
-Pass `--caller-number` to also pre-seed one `FieldEmployee` bound to
-that phone.
-
+**Workspace + one known caller:**
 ```bash
 uv run python -m scripts.seed_test_workspace \
   --ap-number +17578314612 \
@@ -813,61 +958,33 @@ uv run python -m scripts.seed_test_workspace \
   --ap-agent-id cmpa4o1e005ecjz00n7khhuzm
 ```
 
-### Outbound SMS
-
-For `DecisionService` to send SMS pings to the Manager, the workspace
-needs `agentphone_agent_id` set. Pass `--ap-agent-id` on the seed run
-(idempotent — re-running updates the existing row).
-
-### One AP agent owning multiple numbers
-
-One AP agent can own multiple phone numbers — the normal pattern when
-you want one persona to answer on multiple lines. If multiple workspaces
-share one AP agent, the per-agent webhook URL is the same for all; the
-dispatcher routes by `data.to` (the dialed number) to the right
-workspace. Each workspace keeps its own Brain + Caller Memory.
+For outbound SMS (decision pings), pass `--ap-agent-id` (the workspace
+needs `agentphone_agent_id` set). Idempotent — re-running updates the
+existing row.
 
 ---
 
 ## Live end-to-end testing (real phone call)
 
-Verifying the actual hot path — Rep dials AP → webhook → orchestrator
-streams Claude → AP voices it back — requires:
-
-1. Real AgentPhone account with a **voice-capable** dedicated number
-   (not a `shared-imessage` pool number — those route to AP's default
-   handler and never fire your webhook)
+1. Real AP account with a **voice-capable** dedicated number (not `shared-imessage`)
 2. **Per-agent webhook** registered:
    ```bash
-   export AGENTPHONE_API_KEY=ap_...
-   AP_AGENT_ID=cmp...   # from AP dashboard
    curl -X POST "https://api.agentphone.ai/v1/agents/$AP_AGENT_ID/webhook" \
      -H "Authorization: Bearer $AGENTPHONE_API_KEY" \
      -H "Content-Type: application/json" \
-     -d '{
-       "url": "https://YOUR-NGROK.ngrok-free.dev/api/v1/webhooks/agentphone",
-       "contextLimit": 14,
-       "timeout": 30
-     }'
-   # Save the returned "secret" → AGENTPHONE_WEBHOOK_SECRET
+     -d '{"url":"https://YOUR-NGROK/api/v1/webhooks/agentphone","contextLimit":14,"timeout":30}'
    ```
-3. ngrok or Cloudflare Tunnel exposing `localhost:8000`
-4. A seeded workspace whose `primary_number` matches the AP number
-5. Production LLM provider configured
+3. ngrok or Cloudflare Tunnel on :8000
+4. Seeded workspace whose `primary_number` matches the AP number
+5. LLM provider configured
 
-Once seeded, dial the AP number from any mobile — terminal A
-(`make run`) will show the webhook arrive, orchestrator turn-loop
-logs, and the LLM stream.
+Dial from any mobile — terminal A (`make run`) logs the webhook, then
+orchestrator turn loop + LLM stream.
 
-### Why "unknown number" returns 404 (correct)
-
-When AP's synthetic test deliveries or any unknown `data.to` hits the
-webhook with a phone number not registered to any workspace,
+**Why "unknown number" returns 404 (correct):** when the test or any
+caller hits a `data.to` not registered to any workspace,
 `materialize_scope_and_call` raises `NotFound("unknown_number")` and
-the handler returns 404. This is intentional defensive behavior — we
-don't want to silently accept webhooks for numbers we don't manage. A
-404 with `webhook_unknown_scope` in the logs means the handler worked
-correctly; just no scope to dispatch into.
+the handler returns 404. Intentional defensive behavior.
 
 ---
 
@@ -876,21 +993,18 @@ correctly; just no scope to dispatch into.
 | Target | Action |
 |---|---|
 | `make install` | `uv sync` |
-| `make lint` | `ruff check` + `mypy app/` |
-| `make format` | `ruff format` + `ruff check --fix` |
-| `make type` | `mypy app/` |
-| `make test` / `make unit` | unit tests (no external services) |
+| `make lint` / `make format` / `make type` | ruff + mypy |
+| `make test` / `make unit` | unit tests |
 | `make integration` | integration tests (needs compose) |
 | `make e2e` | e2e tests (full stack + fake AP) |
-| `make smoke` | connectivity check across all probes (~2s) |
-| `make smoke-full` | exercise every feature (~30s, costs cents) |
-| `make smoke-repair PROBE=<name>` | verbose diagnostics for one failing probe |
+| `make smoke` / `make smoke-full` | per-integration probes |
+| `make smoke-repair PROBE=<name>` | verbose diagnostics for one probe |
 | `make verify-hot-path` | end-to-end Rep utterance → LLM → TTS latency check |
 | `make skills-eval` | run every `skills/<name>/evals/run.py` |
-| `make run` | `uvicorn app.main:app --reload` |
-| `make worker` | `arq app.workers.settings.WorkerSettings` |
-| `make compose-up` / `compose-down` | start/stop local Postgres + Redis + MinIO |
-| `make migrate` | `alembic upgrade head` on both app + brain DBs |
+| `make run` | uvicorn |
+| `make worker` | arq |
+| `make compose-up` / `compose-down` | start/stop local infra |
+| `make migrate` | `alembic upgrade head` on both DBs |
 
 ---
 
@@ -900,30 +1014,29 @@ correctly; just no scope to dispatch into.
 |---|---|---|
 | `CONFIG` exit on a probe | env vars not loaded | `set -a && source .env.local && set +a` |
 | `UPSTREAM` on an infra probe | compose stack not running | `make compose-up && docker compose ps` |
-| `make migrate` errors `ModuleNotFoundError: psycopg2` | Alembic used wrong dialect | `app/migrations/env.py` uses `+psycopg` (v3) — pull latest + re-run |
-| `make migrate` errors `extension "vector" is not available` | postgres image lacks pgvector | compose uses `pgvector/pgvector:pg16` — `make compose-down -v && make compose-up` |
-| `Identifier exceeds maximum length of 63 characters` during migration | auto-generated FK name too long | already fixed in `0003_intake_buffer_items.py` |
-| Slow first voice turn (~12s before any audio) | Bedrock cold start; lifespan warmup failed | check terminal A for `bedrock_warmup_failed` — likely auth or model id |
-| LLM `auth_valid` FAIL (openai_compat) with 402 | no Anthropic payment method | add card in console.anthropic.com |
-| LLM `basic_completion` FAIL (bedrock) with `inference profile` error | model id isn't a cross-region profile | use `us.anthropic.claude-sonnet-4-6` not `anthropic.claude-sonnet-4-6` |
-| LLM `streaming_completion` FAIL | provider doesn't speak SSE / EventStream | swap providers or fix the proxy |
-| LLM call returns body `{"Output":{"__type":"...UnknownOperationException"}}` | hit the wrong Bedrock URL path | production uses `invoke_model` not `/v1/chat/completions`; this only appears if you curl manually |
-| `caller_a_does_not_see_caller_b_memory` FAIL | Supermemory ignoring tag filter | privacy-critical — **stop, don't deploy**; investigate SDK version + dashboard config |
-| `container_tags_or_semantics_documented` FAIL with "AND-matching" | Supermemory changed semantics | good news — revisit `Retriever.for_turn`; the workaround can be reverted |
-| AgentPhone `test_webhook_delivery` FAIL 401 | uvicorn started with empty `AGENTPHONE_WEBHOOK_SECRET` | restart `make run` after `set -a && source .env.local && set +a` |
-| AgentPhone `test_webhook_delivery` FAIL 500 | downstream dep down (Redis/Postgres) | check terminal A traceback + `make compose-up` |
-| AgentPhone call says "experiencing technical difficulties" + ngrok `ttl` doesn't bump | number is `shared-imessage` or per-agent webhook missing | provision a dedicated voice number; register per-agent webhook |
-| AgentPhone `outbound_sms_capability` FAIL with `/messages` 404 | `SMOKE_AGENTPHONE_TEST_AGENT_ID` is stale or agent has no number | `curl GET /v1/agents/{id}` to verify; attach a number |
-| `conversation_state_roundtrip` FAIL 404 | `SMOKE_AGENTPHONE_TEST_CONVERSATION_ID` stale | dial AP number once to create a fresh conversation, save id |
-| Outbound SMS replies fail with 404 from AP | account-level 10DLC registration incomplete | complete A2P 10DLC in AP dashboard — pure paperwork, no code change |
-| `/api/v1/workspaces/{ws}/integrations/google/auth_url` returns 503 | Google Workspace is intentionally dormant | normal — see [§ Optional integrations](#optional-third-party-integrations) for re-enable steps |
-| Email action item completes with `error: "google_oauth_not_configured"` | same — handler is degrading cleanly | normal; surface the draft to the Manager for manual send |
-| `auth/refresh` returns 200 on a re-used token (reuse detection not firing) | AuthService.refresh used to not commit | fixed — `refresh()` and `logout()` now call `session.commit()` |
-| Tests fail with `value is not a valid email address: …reserved name…` | test used `.test` / `.local` TLD | use `*.example.com` or other non-RFC-reserved TLDs |
-| `Task ... got Future ... attached to a different loop` after `test_migrations` | engine cache pinned to a stale event loop | integration `conftest.py` clears `_engine.cache_clear()` per test |
-| Slow `object_storage` probe (~9s) | first MinIO call cold-start under parallel probe load | harmless; subsequent calls are <50ms |
-| `docker compose up` web exits with `FATAL: password authentication failed` | stale `pg_data/` volume from a prior init | `docker compose down -v && docker compose up --build` |
-| Lifespan log shows `*_close_failed` warnings on shutdown | one of the cached singletons errored on close | non-fatal; other clients still drained. Check the traceback for which adapter |
+| `make migrate` errors `ModuleNotFoundError: psycopg2` | Alembic used wrong dialect | `app/migrations/env.py` uses `+psycopg` (v3) |
+| `make migrate` errors `extension "vector" is not available` | postgres image lacks pgvector | compose uses `pgvector/pgvector:pg16`; `make compose-down -v && make compose-up` |
+| `Identifier exceeds maximum length of 63 characters` | auto-gen FK name too long | fixed in `0003_intake_buffer_items.py` |
+| Slow first voice turn (~12s) | Bedrock cold start; warmup failed | check terminal A for `bedrock_warmup_failed` |
+| LLM `auth_valid` FAIL (openai_compat) with 402 | no Anthropic payment | add card |
+| LLM `basic_completion` FAIL (bedrock) with `inference profile` error | model id not cross-region profile | use `us.anthropic.claude-sonnet-4-6` |
+| LLM call returns `{"Output":{"__type":"...UnknownOperationException"}}` | wrong Bedrock URL | prod uses `invoke_model`; only appears on manual curl |
+| `caller_a_does_not_see_caller_b_memory` FAIL | Supermemory ignoring tag filter | **privacy-critical** — stop, don't deploy |
+| `container_tags_or_semantics_documented` FAIL with "AND-matching" | Supermemory changed semantics | good news — `Retriever.for_turn` can revert to two-tag |
+| AP `test_webhook_delivery` FAIL 401 | uvicorn started with empty `AGENTPHONE_WEBHOOK_SECRET` | restart `make run` after sourcing env |
+| AP `test_webhook_delivery` FAIL 500 | downstream dep down (Redis/Postgres) | check terminal A traceback + `make compose-up` |
+| AP call says "technical difficulties" + ngrok `ttl` doesn't bump | number is `shared-imessage` or per-agent webhook missing | provision dedicated voice number; register per-agent webhook |
+| AP `outbound_sms_capability` FAIL with `/messages` 404 | `SMOKE_AGENTPHONE_TEST_AGENT_ID` stale or no number attached | `curl GET /v1/agents/{id}`; attach number |
+| `conversation_state_roundtrip` FAIL 404 | conversation id stale | dial AP number once, save new id |
+| Outbound SMS replies fail with 404 | 10DLC registration incomplete | complete A2P 10DLC in AP dashboard |
+| `/integrations/google/auth_url` returns 503 | Google Workspace is dormant | normal — see [§ Optional integrations](#optional-third-party-integrations) |
+| Email action item completes with `error: "google_oauth_not_configured"` | handler degrading cleanly | normal; surface draft to Manager |
+| `auth/refresh` returns 200 on re-used token | AuthService used to not commit | fixed — `refresh()` + `logout()` now commit |
+| Tests fail with `value is not a valid email address: …reserved name…` | test used `.test`/`.local` TLD | use non-RFC-reserved (`.example.com` etc.) |
+| `Task ... got Future ... attached to a different loop` after `test_migrations` | engine cache pinned to stale loop | conftest clears `_engine.cache_clear()` per test |
+| Slow `object_storage` probe (~9s) | MinIO cold-start under parallel probe load | harmless; later calls <50ms |
+| `docker compose up` web exits `FATAL: password authentication failed` | stale `pg_data/` volume | `docker compose down -v && docker compose up --build` |
+| Lifespan log shows `*_close_failed` on shutdown | cached singleton errored on close | non-fatal; others still drained |
 
 For full troubleshooting + production triage, see
 `lld/phase_0_scaffolding_and_mvp.md` §B12 and
