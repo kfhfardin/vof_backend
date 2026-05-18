@@ -1,0 +1,150 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0a120e;
+  --fg: #ffffff;
+  --ink: #ffffff;
+  --muted: rgba(255, 255, 255, 0.6);
+  --soft: rgba(255, 255, 255, 0.4);
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.18);
+  --surface: rgba(255, 255, 255, 0.06);
+  --accent: #ffffff;
+  --live: #22c55e;
+  --warn: #fca5a5;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-soft: var(--soft);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-surface: var(--surface);
+  --color-accent: var(--accent);
+  --color-live: var(--live);
+  --color-warn: var(--warn);
+
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-neutral-50: #fafafa;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #404040;
+  --color-neutral-800: #262626;
+  --color-neutral-900: #171717;
+
+  --font-sans: "Maison Neue", "MaisonNeue", "Maison Neue Book", -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-display: "Cooper", "Cooper BT", "Cooper Std", "Cooper Black", "ITC Cooper", "Cooper LT Std", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Consolas, monospace;
+}
+
+/* Base styles must live inside @layer base so utility classes can win.
+   Anything unlayered wins over @layer utilities and silently breaks
+   text-white / bg-* / border-* utilities. */
+@layer base {
+  html {
+    background: var(--bg);
+  }
+
+  body {
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum", "cv11", "ss01";
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: geometricPrecision;
+    min-height: 100vh;
+    background: transparent;
+  }
+
+  /* Blurred bg image — body is transparent so this shows through */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -60px;
+    z-index: -1;
+    background-image: url("/bg.jpg");
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    filter: blur(48px) saturate(1.1) brightness(0.55);
+    transform: scale(1.12);
+    pointer-events: none;
+  }
+
+  /* default border color for raw `border` utility without color */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--line);
+  }
+}
+
+@layer components {
+  .tnum { font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--font-mono); letter-spacing: 0; }
+  .font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.005em;
+    font-weight: 500;
+  }
+
+  .kbd {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--muted);
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    background: var(--live);
+    animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+
+  .slide-up {
+    animation: slide-up 280ms ease-out;
+  }
+
+  /* Glassmorphism surface — translucent, blurs what's behind it */
+  .glass {
+    background: rgba(20, 30, 22, 0.22);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+    backdrop-filter: blur(40px) saturate(180%);
+  }
+
+  .glass-strong {
+    background: rgba(20, 30, 22, 0.36);
+    -webkit-backdrop-filter: blur(56px) saturate(180%);
+    backdrop-filter: blur(56px) saturate(180%);
+  }
+
+  .glass-inset {
+    background: rgba(0, 0, 0, 0.28);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    backdrop-filter: blur(28px) saturate(160%);
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.85); }
+}
+
+@keyframes slide-up {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
